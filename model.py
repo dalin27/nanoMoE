@@ -86,6 +86,9 @@ class Router(nn.Module):
         self.top_k = config.top_k
         self.n_exp = config.n_exp
         assert self.top_k >= 1 and self.top_k <= config.n_exp
+        self.router_selection = config.router_selection
+        assert self.router_selection in {'topk', 'sample_without_replacement'}
+        self.sample_routing_eval = config.sample_routing_eval
         self.use_noisy_top_k = config.use_noisy_top_k
         self.train_capacity = config.train_capacity
         self.eval_capacity = config.eval_capacity
@@ -99,7 +102,10 @@ class Router(nn.Module):
         # linear projection for (noisy) softmax gating
         # no bias is used, see page 4 eq (4) in (https://arxiv.org/abs/1701.06538)
         self.w_g = nn.Linear(config.n_embd, config.n_exp, bias=False)
-        self.w_noise = nn.Linear(config.n_embd, config.n_exp, bias=False) if self.use_noisy_top_k else None
+        # Noisy routing only applies to deterministic top-k routing.
+        self.w_noise = nn.Linear(config.n_embd, config.n_exp, bias=False) if (
+            self.use_noisy_top_k and self.router_selection == 'topk'
+        ) else None
     
     def forward(self, x):
         # optionally run the router in full precision to avoid instability during training
@@ -114,7 +120,7 @@ class Router(nn.Module):
 
             # eq (4) in (https://arxiv.org/abs/1701.06538)
             logits = self.w_g(x)  # [B, T, n_exp]
-            if self.use_noisy_top_k:
+            if self.w_noise is not None:
                 # optionally add noise into the router
                 noise = F.softplus(self.w_noise(x))
                 noise *= torch.randn_like(noise)
@@ -126,27 +132,44 @@ class Router(nn.Module):
                 z_loss = self.compute_router_z_loss(logits)
                 MANAGER.add_router_z_loss(z_loss)
 
-            # find top k experts for each token
-            top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1) # [B, T, k]
+            route_mode = self.router_selection
+            if route_mode == 'sample_without_replacement' and not self.training and not self.sample_routing_eval:
+                route_mode = 'topk'
 
-            # normalize expert probabilities
-            # Question: should we normalize over all experts or just top-k?
-            # we choose to normalize over top-k, other option is commented out below
+            if route_mode == 'topk':
+                # find top k experts for each token
+                top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1) # [B, T, k]
 
-            # Shazeer et al (https://arxiv.org/abs/1701.06538) does only topk
-            # see page 4 eq (3)-(5), the code for this is commented out below
-            router_probs = torch.full_like(logits, float('-inf'))  # [B, T, n_exp]
-            router_probs.scatter_(-1, top_k_indices, top_k_logits)
-            router_probs = F.softmax(router_probs, dim=-1)
+                # Shazeer et al (https://arxiv.org/abs/1701.06538) does only top-k
+                dispatch_probs = torch.full_like(logits, float('-inf'))  # [B, T, n_exp]
+                dispatch_probs.scatter_(-1, top_k_indices, top_k_logits)
+                dispatch_probs = F.softmax(dispatch_probs, dim=-1)
+                aux_probs = dispatch_probs
+                chosen_indices = top_k_indices
+            else:
+                # Sample k distinct experts without replacement from the full router distribution.
+                full_probs = F.softmax(logits, dim=-1)
+                flat_probs = full_probs.view(-1, self.n_exp).float()
+                chosen_indices = torch.multinomial(flat_probs, num_samples=self.top_k, replacement=False)
+                chosen_indices = chosen_indices.view(B, T, self.top_k)
 
-            # # normalize all router logits (not just top-k) via softmax      
-            # router_probs = F.softmax(logits, dim=-1)
+                # Preserve existing capacity behavior by sorting selected experts by sampled probability.
+                chosen_probs = full_probs.gather(-1, chosen_indices)
+                chosen_probs, sort_order = chosen_probs.sort(dim=-1, descending=True)
+                chosen_indices = chosen_indices.gather(-1, sort_order)
+                chosen_probs = chosen_probs / chosen_probs.sum(dim=-1, keepdim=True).clamp_min(
+                    torch.finfo(chosen_probs.dtype).eps
+                )
+
+                dispatch_probs = torch.zeros_like(full_probs)
+                dispatch_probs.scatter_(-1, chosen_indices, chosen_probs)
+                aux_probs = full_probs
 
             # compute auxiliary load balancing loss
             # this loss encourages equal probability assigned to each expert
             # and equal load balancing of tokens assigned to each expert
             if self.use_aux_loss:
-                aux_loss = self.compute_aux_loss(router_probs, top_k_indices)
+                aux_loss = self.compute_aux_loss(aux_probs, chosen_indices)
                 MANAGER.add_aux_loss(aux_loss)
 
             # compute expert capacity
@@ -154,7 +177,7 @@ class Router(nn.Module):
 
             # make a multi-hot mask of chosen experts, size [B, T, n_exp]
             # entries are 0 if expert not chosen and 1 if expert chosen
-            exp_mask = F.one_hot(top_k_indices, num_classes=self.n_exp)  # [B, T, k, n_exp]
+            exp_mask = F.one_hot(chosen_indices, num_classes=self.n_exp)  # [B, T, k, n_exp]
             exp_mask = exp_mask.view(num_tokens, self.top_k, self.n_exp)  # [B * T, k, n_exp]
             exp_mask = exp_mask.permute(1, 0, 2) # [k, B * T, n_exp]
 
@@ -180,8 +203,8 @@ class Router(nn.Module):
             exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [k, B * T]
 
             # mask probabilities to only include selected experts
-            router_probs = router_probs.view(num_tokens, self.n_exp)[None, :] # [1, B * T, n_exp]
-            exp_weights = exp_mask * router_probs # [k, B * T, n_exp]
+            dispatch_probs = dispatch_probs.view(num_tokens, self.n_exp)[None, :] # [1, B * T, n_exp]
+            exp_weights = exp_mask * dispatch_probs # [k, B * T, n_exp]
 
             # convert rank into one-hot vectors over the available capacity
             # stores the position of each token within the capacity of the selected expert
@@ -350,9 +373,11 @@ class GPTConfig:
     # MoE-related configs 
     n_exp: int = 1 # if n_exp = 1 we just use regular MLP layers
     top_k: int = 2
+    router_selection: str = 'topk'
+    sample_routing_eval: bool = False
     use_aux_loss: bool = False # apply auxiliary loss (from Switch Transformer) in router
     use_router_z_loss: bool = False # apply router z loss (from ST-MoE)
-    use_noisy_top_k: bool = False
+    use_noisy_top_k: bool = False # only used when router_selection == 'topk'
     aux_loss_weight: float = 0.01 # default setting from Switch Transformer (see top of page 8)
     router_z_loss_weight: float = 0.001 # default setting from ST-MoE (see page 8 eq. 6)
     train_capacity: float = 1.25  # default setting from ST-MoE (see top of page 6)

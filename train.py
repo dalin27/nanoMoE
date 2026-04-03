@@ -65,6 +65,8 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 # moe
 n_exp = 1 # if n_exp = 1 we just use regular MLP layers
 top_k = 2
+router_selection = 'topk' # 'topk' or 'sample_without_replacement'
+sample_routing_eval = False # if False, eval uses deterministic top-k even when training samples experts
 use_aux_loss = False
 use_router_z_loss = False
 use_noisy_top_k = False
@@ -175,6 +177,7 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, dropout=dropout, n_exp=n_exp, top_k=top_k,
+                  router_selection=router_selection, sample_routing_eval=sample_routing_eval,
                   use_aux_loss=use_aux_loss, use_router_z_loss=use_router_z_loss,
                   use_noisy_top_k=use_noisy_top_k, aux_loss_weight=aux_loss_weight,
                   router_z_loss_weight=router_z_loss_weight, train_capacity=train_capacity,
