@@ -7,6 +7,7 @@ https://github.com/openai/gpt-2/blob/master/src/model.py
 https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
 """
 
+import itertools
 import math
 import inspect
 from dataclasses import dataclass
@@ -98,6 +99,7 @@ class Router(nn.Module):
         # auxiliary / load balancing loss settings
         self.use_aux_loss = config.use_aux_loss
         self.use_router_z_loss = config.use_router_z_loss
+        self.use_reinforce_routing = config.use_reinforce_routing
 
         # linear projection for (noisy) softmax gating
         # no bias is used, see page 4 eq (4) in (https://arxiv.org/abs/1701.06538)
@@ -106,6 +108,14 @@ class Router(nn.Module):
         self.w_noise = nn.Linear(config.n_embd, config.n_exp, bias=False) if (
             self.use_noisy_top_k and self.router_selection == 'topk'
         ) else None
+        if self.use_reinforce_routing:
+            if self.router_selection != 'sample_without_replacement':
+                raise ValueError("REINFORCE routing is only supported with sample_without_replacement routing")
+            if self.top_k > 3:
+                raise ValueError("Exact REINFORCE routing is only supported for top_k <= 3")
+            self.reinforce_permutations = tuple(itertools.permutations(range(self.top_k)))
+        else:
+            self.reinforce_permutations = ()
     
     def forward(self, x):
         # optionally run the router in full precision to avoid instability during training
@@ -149,14 +159,16 @@ class Router(nn.Module):
             else:
                 # Sample k distinct experts without replacement from the full router distribution.
                 full_probs = F.softmax(logits, dim=-1)
-                flat_probs = full_probs.view(-1, self.n_exp).float()
+                flat_probs = full_probs.reshape(-1, self.n_exp).float()
                 chosen_indices = torch.multinomial(flat_probs, num_samples=self.top_k, replacement=False)
                 chosen_indices = chosen_indices.view(B, T, self.top_k)
 
-                # Preserve existing capacity behavior by sorting selected experts by sampled probability.
-                chosen_probs = full_probs.gather(-1, chosen_indices)
-                chosen_probs, sort_order = chosen_probs.sort(dim=-1, descending=True)
-                chosen_indices = chosen_indices.gather(-1, sort_order)
+                # Capacity overflow uses slot order, so sort sampled experts into a canonical action.
+                chosen_indices, chosen_probs = self.canonicalize_sampled_experts(full_probs, chosen_indices)
+                if self.use_reinforce_routing and self.training:
+                    MANAGER.add_reinforce_log_prob(
+                        self.compute_sorted_action_log_prob(full_probs, chosen_indices)
+                    )
                 chosen_probs = chosen_probs / chosen_probs.sum(dim=-1, keepdim=True).clamp_min(
                     torch.finfo(chosen_probs.dtype).eps
                 )
@@ -194,6 +206,13 @@ class Router(nn.Module):
             # compute amount of used capacity by taking a sum over mask
             exp_mask *= torch.lt(exp_rank, exp_capacity) # [k, B * T, n_exp]
             used_capacity = torch.sum(exp_mask, dim=(0, 1)) # [n_exp]
+            capacity_util = used_capacity.float() / exp_capacity
+            MANAGER.add_capacity_stats({
+                'frac_at_limit': (used_capacity == exp_capacity).float().mean().detach(),
+                'mean_utilization': capacity_util.mean().detach(),
+                'max_utilization': capacity_util.max().detach(),
+                'dropped_fraction': (1.0 - used_capacity.sum().float() / (self.top_k * num_tokens)).detach(),
+            })
 
             # mask rank to only include tokens that are selected
             # perform a sum so each row only contains index of token
@@ -216,6 +235,34 @@ class Router(nn.Module):
             cb_weight = torch.sum(exp_weights.unsqueeze(3) * exp_rank_sc.unsqueeze(2), dim=0)
             sec_mask = cb_weight.bool() # binary mask of selected experts for each token
             return used_capacity, cb_weight, sec_mask
+
+    def canonicalize_sampled_experts(self, full_probs: torch.Tensor, chosen_indices: torch.Tensor):
+        chosen_probs = full_probs.gather(-1, chosen_indices)
+        chosen_indices, index_order = chosen_indices.sort(dim=-1)
+        chosen_probs = chosen_probs.gather(-1, index_order)
+        chosen_probs, prob_order = torch.sort(chosen_probs, dim=-1, descending=True, stable=True)
+        chosen_indices = chosen_indices.gather(-1, prob_order)
+        return chosen_indices, chosen_probs
+
+    def compute_sorted_action_log_prob(self, full_probs: torch.Tensor, chosen_indices: torch.Tensor):
+        flat_probs = full_probs.reshape(-1, self.n_exp).float()
+        flat_indices = chosen_indices.reshape(-1, self.top_k)
+        eps = torch.finfo(flat_probs.dtype).eps
+
+        perm_log_probs = []
+        for perm in self.reinforce_permutations:
+            permuted_indices = flat_indices[:, list(perm)]
+            permuted_probs = flat_probs.gather(1, permuted_indices)
+            remaining = torch.ones(flat_probs.size(0), device=flat_probs.device, dtype=flat_probs.dtype)
+            log_q = torch.zeros_like(remaining)
+            for step in range(self.top_k):
+                p_step = permuted_probs[:, step].clamp_min(eps)
+                log_q = log_q + torch.log(p_step) - torch.log(remaining.clamp_min(eps))
+                remaining = remaining - p_step
+            perm_log_probs.append(log_q)
+
+        log_q = torch.logsumexp(torch.stack(perm_log_probs, dim=0), dim=0)
+        return log_q.view(*chosen_indices.shape[:2])
     
     def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
         """
@@ -378,8 +425,10 @@ class GPTConfig:
     use_aux_loss: bool = False # apply auxiliary loss (from Switch Transformer) in router
     use_router_z_loss: bool = False # apply router z loss (from ST-MoE)
     use_noisy_top_k: bool = False # only used when router_selection == 'topk'
+    use_reinforce_routing: bool = False # add an exact REINFORCE term for sorted sampled routing
     aux_loss_weight: float = 0.01 # default setting from Switch Transformer (see top of page 8)
     router_z_loss_weight: float = 0.001 # default setting from ST-MoE (see page 8 eq. 6)
+    reinforce_loss_weight: float = 1.0
     train_capacity: float = 1.25  # default setting from ST-MoE (see top of page 6)
     eval_capacity: float = 2.0
     min_capacity: int = 4  # minimum batch size to send to any single expert
@@ -396,6 +445,7 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
+        self.last_capacity_stats = None
 
         if config.n_exp == 1:
             # create normal transformer blocks
@@ -529,19 +579,38 @@ class GPT(nn.Module):
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            token_loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1),
+                ignore_index=-1,
+                reduction='none',
+            ).view(b, t)
+            valid_mask = targets != -1
+            ce_mean = token_loss[valid_mask].mean()
+            loss = ce_mean
+
+            if self.config.n_exp > 1 and self.config.use_reinforce_routing and self.training:
+                log_q_total = MANAGER.aggregate_reinforce_log_prob()
+                if log_q_total is None:
+                    raise RuntimeError("Expected sorted-action log probabilities for REINFORCE routing")
+                reinforce_loss = (((token_loss - ce_mean).detach()) * log_q_total)[valid_mask].mean()
+                loss = loss + self.config.reinforce_loss_weight * reinforce_loss
+                MANAGER.reset_reinforce_log_prob()
 
             # add the auxiliary load balancing loss and router z loss to the main loss
             if self.config.n_exp > 1 and self.config.use_aux_loss:
-                loss += self.config.aux_loss_weight * MANAGER.aggregate_aux_loss()
+                loss = loss + self.config.aux_loss_weight * MANAGER.aggregate_aux_loss()
                 MANAGER.reset_aux_loss()
             if self.config.n_exp > 1 and self.config.use_router_z_loss:
-                loss += self.config.router_z_loss_weight * MANAGER.aggregate_router_z_loss()
+                loss = loss + self.config.router_z_loss_weight * MANAGER.aggregate_router_z_loss()
                 MANAGER.reset_router_z_loss()
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
+
+        self.last_capacity_stats = MANAGER.aggregate_capacity_stats()
+        MANAGER.reset_capacity_stats()
 
         return logits, loss
 

@@ -70,8 +70,10 @@ sample_routing_eval = False # if False, eval uses deterministic top-k even when 
 use_aux_loss = False
 use_router_z_loss = False
 use_noisy_top_k = False
+use_reinforce_routing = False
 aux_loss_weight = 0.001
 router_z_loss_weight = 0.01
+reinforce_loss_weight = 1.0
 train_capacity = 1.25
 eval_capacity = 2.0
 min_capacity = 4
@@ -179,8 +181,9 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
                   bias=bias, vocab_size=None, dropout=dropout, n_exp=n_exp, top_k=top_k,
                   router_selection=router_selection, sample_routing_eval=sample_routing_eval,
                   use_aux_loss=use_aux_loss, use_router_z_loss=use_router_z_loss,
-                  use_noisy_top_k=use_noisy_top_k, aux_loss_weight=aux_loss_weight,
-                  router_z_loss_weight=router_z_loss_weight, train_capacity=train_capacity,
+                  use_noisy_top_k=use_noisy_top_k, use_reinforce_routing=use_reinforce_routing,
+                  aux_loss_weight=aux_loss_weight, router_z_loss_weight=router_z_loss_weight,
+                  reinforce_loss_weight=reinforce_loss_weight, train_capacity=train_capacity,
                   eval_capacity=eval_capacity, min_capacity=min_capacity, stride=stride,
                   use_switch_tfm_init=use_switch_tfm_init, switch_tfm_init_scale=switch_tfm_init_scale,
                   router_use_full_prec=router_use_full_prec) # start with model_args from command line
@@ -259,12 +262,24 @@ def estimate_loss():
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
+        capacity_sums = None
+        capacity_count = 0
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
                 _, loss = model(X, Y)
             losses[k] = loss.item()
+            stats = (model.module if ddp else model).last_capacity_stats
+            if stats is not None:
+                if capacity_sums is None:
+                    capacity_sums = {key: 0.0 for key in stats}
+                for key, value in stats.items():
+                    capacity_sums[key] += float(value)
+                capacity_count += 1
         out[split] = losses.mean()
+        if capacity_sums is not None and capacity_count > 0:
+            for key, value in capacity_sums.items():
+                out[f"{split}/{key}"] = value / capacity_count
     model.train()
     return out
 
@@ -303,15 +318,29 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        capacity_msg = ""
+        if 'train/frac_at_limit' in losses:
+            capacity_msg = (
+                f", train cap frac {losses['train/frac_at_limit']:.3f}"
+                f", val cap frac {losses['val/frac_at_limit']:.3f}"
+                f", train drop frac {losses['train/dropped_fraction']:.3f}"
+                f", val drop frac {losses['val/dropped_fraction']:.3f}"
+            )
+        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}{capacity_msg}")
         if wandb_log:
-            wandb.log({
+            metrics = {
                 "iter": iter_num,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
-            })
+            }
+            for split in ['train', 'val']:
+                for key in ['frac_at_limit', 'mean_utilization', 'max_utilization', 'dropped_fraction']:
+                    metric_key = f"{split}/{key}"
+                    if metric_key in losses:
+                        metrics[f"capacity/{split}/{key}"] = losses[metric_key]
+            wandb.log(metrics)
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
