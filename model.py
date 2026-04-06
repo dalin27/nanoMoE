@@ -100,6 +100,7 @@ class Router(nn.Module):
         self.use_aux_loss = config.use_aux_loss
         self.use_router_z_loss = config.use_router_z_loss
         self.use_reinforce_routing = config.use_reinforce_routing
+        self.use_straight_through_routing = config.use_straight_through_routing
 
         # linear projection for (noisy) softmax gating
         # no bias is used, see page 4 eq (4) in (https://arxiv.org/abs/1701.06538)
@@ -108,6 +109,10 @@ class Router(nn.Module):
         self.w_noise = nn.Linear(config.n_embd, config.n_exp, bias=False) if (
             self.use_noisy_top_k and self.router_selection == 'topk'
         ) else None
+        if self.use_reinforce_routing and self.use_straight_through_routing:
+            raise ValueError("REINFORCE routing and straight-through routing are mutually exclusive")
+        if self.use_straight_through_routing and self.router_selection != 'sample_without_replacement':
+            raise ValueError("Straight-through routing is only supported with sample_without_replacement routing")
         if self.use_reinforce_routing:
             if self.router_selection != 'sample_without_replacement':
                 raise ValueError("REINFORCE routing is only supported with sample_without_replacement routing")
@@ -145,6 +150,7 @@ class Router(nn.Module):
             route_mode = self.router_selection
             if route_mode == 'sample_without_replacement' and not self.training and not self.sample_routing_eval:
                 route_mode = 'topk'
+            use_straight_through = self.use_straight_through_routing and route_mode == 'sample_without_replacement'
 
             if route_mode == 'topk':
                 # find top k experts for each token
@@ -222,8 +228,19 @@ class Router(nn.Module):
             exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [k, B * T]
 
             # mask probabilities to only include selected experts
-            dispatch_probs = dispatch_probs.view(num_tokens, self.n_exp)[None, :] # [1, B * T, n_exp]
-            exp_weights = exp_mask * dispatch_probs # [k, B * T, n_exp]
+            dispatch_probs = dispatch_probs.view(num_tokens, self.n_exp)
+            exp_mask = exp_mask.to(dispatch_probs.dtype)
+            exp_weights_hard = exp_mask * dispatch_probs[None, :] # [k, B * T, n_exp]
+            if use_straight_through:
+                kept_mask = exp_mask.sum(dim=0) # [B * T, n_exp]
+                dispatch_soft_selected = full_probs.reshape(num_tokens, self.n_exp) * kept_mask
+                dispatch_soft_selected = dispatch_soft_selected / dispatch_soft_selected.sum(
+                    dim=-1, keepdim=True
+                ).clamp_min(torch.finfo(dispatch_soft_selected.dtype).eps)
+                exp_weights_soft = exp_mask * dispatch_soft_selected.unsqueeze(0)
+                exp_weights = exp_weights_hard.detach() - exp_weights_soft.detach() + exp_weights_soft
+            else:
+                exp_weights = exp_weights_hard
 
             # convert rank into one-hot vectors over the available capacity
             # stores the position of each token within the capacity of the selected expert
@@ -426,6 +443,7 @@ class GPTConfig:
     use_router_z_loss: bool = False # apply router z loss (from ST-MoE)
     use_noisy_top_k: bool = False # only used when router_selection == 'topk'
     use_reinforce_routing: bool = False # add an exact REINFORCE term for sorted sampled routing
+    use_straight_through_routing: bool = False # use a support-restricted straight-through gradient for sampled routing
     aux_loss_weight: float = 0.01 # default setting from Switch Transformer (see top of page 8)
     router_z_loss_weight: float = 0.001 # default setting from ST-MoE (see page 8 eq. 6)
     reinforce_loss_weight: float = 1.0

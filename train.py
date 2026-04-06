@@ -71,6 +71,7 @@ use_aux_loss = False
 use_router_z_loss = False
 use_noisy_top_k = False
 use_reinforce_routing = False
+use_straight_through_routing = False
 aux_loss_weight = 0.001
 router_z_loss_weight = 0.01
 reinforce_loss_weight = 1.0
@@ -182,6 +183,7 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
                   router_selection=router_selection, sample_routing_eval=sample_routing_eval,
                   use_aux_loss=use_aux_loss, use_router_z_loss=use_router_z_loss,
                   use_noisy_top_k=use_noisy_top_k, use_reinforce_routing=use_reinforce_routing,
+                  use_straight_through_routing=use_straight_through_routing,
                   aux_loss_weight=aux_loss_weight, router_z_loss_weight=router_z_loss_weight,
                   reinforce_loss_weight=reinforce_loss_weight, train_capacity=train_capacity,
                   eval_capacity=eval_capacity, min_capacity=min_capacity, stride=stride,
