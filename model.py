@@ -19,6 +19,41 @@ from torch.nn import functional as F
 
 from manager import MANAGER
 
+# Instrumentation definitions for future loss-free balancing experiments:
+# - expert usage = token-expert assignments per token
+# - neuron usage = positive preactivation rate before GELU
+# - EMA buffers are local-process instrumentation under DDP
+# - future bias hooks would naturally attach to router logits and pre-GELU activations
+
+def _safe_coefficient_of_variation(values: torch.Tensor, eps: float = 1e-9):
+    values = values.float()
+    return values.std(unbiased=False) / values.mean().abs().clamp_min(eps)
+
+def _normalized_entropy(values: torch.Tensor, eps: float = 1e-9):
+    values = values.float().clamp_min(0.0)
+    total = values.sum()
+    if total.item() <= 0:
+        return values.new_tensor(0.0)
+    probs = values / total
+    if probs.numel() <= 1:
+        return probs.new_tensor(1.0)
+    entropy = -(probs * torch.log(probs.clamp_min(eps))).sum()
+    return entropy / math.log(probs.numel())
+
+def _min_to_max_ratio(values: torch.Tensor, eps: float = 1e-9):
+    values = values.float()
+    return values.min() / values.max().clamp_min(eps)
+
+def _normalized_l1_distance(values_a: torch.Tensor, values_b: torch.Tensor, eps: float = 1e-9):
+    values_a = values_a.float()
+    values_b = values_b.float()
+    probs_a = values_a / values_a.sum().clamp_min(eps)
+    probs_b = values_b / values_b.sum().clamp_min(eps)
+    return torch.abs(probs_a - probs_b).sum()
+
+def _update_ema_buffer(buffer: torch.Tensor, value: torch.Tensor, beta: float):
+    buffer.mul_(beta).add_(value.detach().to(buffer.dtype), alpha=1.0 - beta)
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -95,12 +130,16 @@ class Router(nn.Module):
         self.eval_capacity = config.eval_capacity
         self.min_capacity = config.min_capacity
         self.router_use_full_prec = config.router_use_full_prec
+        self.usage_ema_beta = config.usage_ema_beta
+        self.layer_name = None
 
         # auxiliary / load balancing loss settings
         self.use_aux_loss = config.use_aux_loss
         self.use_router_z_loss = config.use_router_z_loss
         self.use_reinforce_routing = config.use_reinforce_routing
         self.use_straight_through_routing = config.use_straight_through_routing
+        self.register_buffer("expert_usage_ema", torch.zeros(self.n_exp))
+        self.collect_balance_metrics = True
 
         # linear projection for (noisy) softmax gating
         # no bias is used, see page 4 eq (4) in (https://arxiv.org/abs/1701.06538)
@@ -198,6 +237,7 @@ class Router(nn.Module):
             exp_mask = F.one_hot(chosen_indices, num_classes=self.n_exp)  # [B, T, k, n_exp]
             exp_mask = exp_mask.view(num_tokens, self.top_k, self.n_exp)  # [B * T, k, n_exp]
             exp_mask = exp_mask.permute(1, 0, 2) # [k, B * T, n_exp]
+            attempted_assignments = exp_mask.sum(dim=(0, 1))
 
             # compute cumulative sum of each token over experts, this stores
             # the index of each token within the batch of each expert
@@ -219,6 +259,18 @@ class Router(nn.Module):
                 'max_utilization': capacity_util.max().detach(),
                 'dropped_fraction': (1.0 - used_capacity.sum().float() / (self.top_k * num_tokens)).detach(),
             })
+            with torch.no_grad():
+                expert_usage_attempted, expert_balance_metrics = self.build_expert_balance_metrics(
+                    attempted_assignments=attempted_assignments,
+                    accepted_assignments=used_capacity,
+                    exp_capacity=exp_capacity,
+                    num_tokens=num_tokens,
+                )
+                if self.training and self.collect_balance_metrics:
+                    _update_ema_buffer(self.expert_usage_ema, expert_usage_attempted, self.usage_ema_beta)
+                    expert_balance_metrics["expert_usage_ema"] = self.expert_usage_ema.detach()
+                if self.collect_balance_metrics and self.layer_name is not None:
+                    MANAGER.add_expert_balance_metrics(self.layer_name, expert_balance_metrics)
 
             # mask rank to only include tokens that are selected
             # perform a sum so each row only contains index of token
@@ -280,6 +332,44 @@ class Router(nn.Module):
 
         log_q = torch.logsumexp(torch.stack(perm_log_probs, dim=0), dim=0)
         return log_q.view(*chosen_indices.shape[:2])
+
+    def build_expert_balance_metrics(self, attempted_assignments, accepted_assignments, exp_capacity, num_tokens):
+        attempted_assignments = attempted_assignments.float()
+        accepted_assignments = accepted_assignments.float()
+        expert_usage_attempted = attempted_assignments / num_tokens
+        expert_usage_accepted = accepted_assignments / num_tokens
+        expert_usage_target = expert_usage_attempted.new_tensor(self.top_k / self.n_exp)
+
+        mean_attempted = expert_usage_attempted.mean()
+        mean_accepted = expert_usage_accepted.mean()
+        fraction_experts_at_capacity = (accepted_assignments == exp_capacity).float().mean()
+        assignment_drop_fraction = 1.0 - accepted_assignments.sum() / (self.top_k * num_tokens)
+
+        metrics = {
+            "expert_usage_attempted": expert_usage_attempted.detach(),
+            "expert_usage_accepted": expert_usage_accepted.detach(),
+            "expert_usage_target": expert_usage_target.detach(),
+            "expert_usage_ema": self.expert_usage_ema.detach(),
+            "fraction_experts_at_capacity": fraction_experts_at_capacity.detach(),
+            "assignment_drop_fraction": assignment_drop_fraction.detach(),
+            "max_expert_usage_attempted_over_mean": (
+                expert_usage_attempted.max() / mean_attempted.clamp_min(1e-9)
+            ).detach(),
+            "max_expert_usage_accepted_over_mean": (
+                expert_usage_accepted.max() / mean_accepted.clamp_min(1e-9)
+            ).detach(),
+            "min_to_max_expert_usage_attempted": _min_to_max_ratio(expert_usage_attempted).detach(),
+            "min_to_max_expert_usage_accepted": _min_to_max_ratio(expert_usage_accepted).detach(),
+            "cv_expert_usage_attempted": _safe_coefficient_of_variation(expert_usage_attempted).detach(),
+            "cv_expert_usage_accepted": _safe_coefficient_of_variation(expert_usage_accepted).detach(),
+            "entropy_expert_usage_attempted_normalized": _normalized_entropy(expert_usage_attempted).detach(),
+            "entropy_expert_usage_accepted_normalized": _normalized_entropy(expert_usage_accepted).detach(),
+            "l1_expert_usage_attempted_vs_accepted": _normalized_l1_distance(
+                expert_usage_attempted,
+                expert_usage_accepted,
+            ).detach(),
+        }
+        return expert_usage_attempted, metrics
     
     def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
         """
@@ -331,14 +421,37 @@ class Router(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.usage_ema_beta = config.usage_ema_beta
+        self.layer_name = None
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.gelu    = nn.GELU()
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
+        self.register_buffer("neuron_usage_ema", torch.zeros(4 * config.n_embd))
+        self.collect_balance_metrics = True
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = self.gelu(x)
+        preact = self.c_fc(x)
+        with torch.no_grad():
+            if self.collect_balance_metrics:
+                neuron_usage_rate = (preact > 0).float().mean(dim=(0, 1))
+                if self.training:
+                    _update_ema_buffer(self.neuron_usage_ema, neuron_usage_rate, self.usage_ema_beta)
+                if self.layer_name is not None:
+                    MANAGER.add_neuron_balance_metrics(self.layer_name, {
+                        "neuron_usage_rate": neuron_usage_rate.detach(),
+                        "neuron_usage_target": neuron_usage_rate.new_tensor(0.5).detach(),
+                        "neuron_usage_ema": self.neuron_usage_ema.detach(),
+                        "mean_neuron_usage_rate": neuron_usage_rate.mean().detach(),
+                        "std_neuron_usage_rate": neuron_usage_rate.std(unbiased=False).detach(),
+                        "min_neuron_usage_rate": neuron_usage_rate.min().detach(),
+                        "median_neuron_usage_rate": neuron_usage_rate.median().detach(),
+                        "max_neuron_usage_rate": neuron_usage_rate.max().detach(),
+                        "fraction_neurons_at_zero": (neuron_usage_rate < 1e-5).float().mean().detach(),
+                        "cv_neuron_usage_rate": _safe_coefficient_of_variation(neuron_usage_rate).detach(),
+                        "entropy_neuron_usage_rate_normalized": _normalized_entropy(neuron_usage_rate).detach(),
+                    })
+        x = self.gelu(preact)
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
@@ -354,6 +467,8 @@ class MLPExperts(nn.Module):
         # TODO: add param init
         super().__init__()
         self.bias = config.bias
+        self.usage_ema_beta = config.usage_ema_beta
+        self.layer_name = None
 
         self.c_fc = nn.Parameter(torch.empty(config.n_exp, config.n_embd, 4 * config.n_embd))
         self.c_proj = nn.Parameter(torch.empty(config.n_exp, 4 * config.n_embd, config.n_embd))
@@ -361,13 +476,46 @@ class MLPExperts(nn.Module):
         self.proj_bias = nn.Parameter(torch.empty(config.n_exp, 1, config.n_embd)) if self.bias else None
         self.gelu = nn.GELU()
         self.dropout = nn.Dropout(config.dropout)
+        self.register_buffer("neuron_usage_ema", torch.zeros(config.n_exp, 4 * config.n_embd))
+        self.collect_balance_metrics = True
     
 
-    def forward(self, x):
-        x = torch.bmm(x, self.c_fc)
+    def forward(self, x, used_capacity=None):
+        preact = torch.bmm(x, self.c_fc)
         if self.bias:
-            x += self.fc_bias
-        x = self.gelu(x)
+            preact += self.fc_bias
+        with torch.no_grad():
+            if self.collect_balance_metrics and used_capacity is not None:
+                exp_capacity = preact.size(1)
+                slot_idx = torch.arange(exp_capacity, device=preact.device).unsqueeze(0)
+                valid_slots = slot_idx < used_capacity.unsqueeze(1)
+                active = (preact > 0).float()
+                valid_mask = valid_slots.unsqueeze(-1).float()
+                valid_counts = valid_slots.sum(dim=1, keepdim=True).float().clamp_min(1.0)
+                neuron_usage_rate = (active * valid_mask).sum(dim=1) / valid_counts
+                if self.training:
+                    _update_ema_buffer(self.neuron_usage_ema, neuron_usage_rate, self.usage_ema_beta)
+                if self.layer_name is not None:
+                    per_expert_mean = neuron_usage_rate.mean(dim=-1)
+                    flat_usage = neuron_usage_rate.reshape(-1)
+                    MANAGER.add_neuron_balance_metrics(self.layer_name, {
+                        "neuron_usage_rate": neuron_usage_rate.detach(),
+                        "neuron_usage_target": neuron_usage_rate.new_tensor(0.5).detach(),
+                        "neuron_usage_ema": self.neuron_usage_ema.detach(),
+                        "mean_neuron_usage_rate": flat_usage.mean().detach(),
+                        "std_neuron_usage_rate": flat_usage.std(unbiased=False).detach(),
+                        "min_neuron_usage_rate": flat_usage.min().detach(),
+                        "median_neuron_usage_rate": flat_usage.median().detach(),
+                        "max_neuron_usage_rate": flat_usage.max().detach(),
+                        "fraction_neurons_at_zero": (flat_usage < 1e-5).float().mean().detach(),
+                        "cv_neuron_usage_rate": _safe_coefficient_of_variation(flat_usage).detach(),
+                        "entropy_neuron_usage_rate_normalized": _normalized_entropy(flat_usage).detach(),
+                        "per_expert_mean_neuron_usage_rate": per_expert_mean.detach(),
+                        "min_expert_mean_neuron_usage_rate": per_expert_mean.min().detach(),
+                        "median_expert_mean_neuron_usage_rate": per_expert_mean.median().detach(),
+                        "max_expert_mean_neuron_usage_rate": per_expert_mean.max().detach(),
+                    })
+        x = self.gelu(preact)
         x = torch.bmm(x, self.c_proj)
         if self.bias:
             x += self.proj_bias
@@ -395,7 +543,7 @@ class MOELayer(nn.Module):
         exp_batches = exp_mask.permute(1, 2, 0).type_as(x) @ x
 
         # compute expert output
-        exp_out = self.experts(exp_batches) # [n_exp, exp_capacity, n_embd]
+        exp_out = self.experts(exp_batches, used_capacity=used_capacity) # [n_exp, exp_capacity, n_embd]
 
         # aggregate expert outputs based on router weights
         # eq (2) on page 4 of ST-MoE (https://arxiv.org/abs/2202.08906)
@@ -454,6 +602,7 @@ class GPTConfig:
     use_switch_tfm_init: bool = False  # use weight init scheme from Switch Transformer
     switch_tfm_init_scale: float = 1.0
     router_use_full_prec: bool = False  # use float32 precision in the router
+    usage_ema_beta: float = 0.99  # EMA beta for local-process instrumentation only
 
 
 class GPT(nn.Module):
@@ -464,6 +613,9 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
         self.last_capacity_stats = None
+        self.last_expert_balance_metrics = None
+        self.last_neuron_balance_metrics = None
+        self.collect_balance_metrics = True
 
         if config.n_exp == 1:
             # create normal transformer blocks
@@ -477,6 +629,13 @@ class GPT(nn.Module):
                 use_moe = (i % config.stride) == 0
                 blocks.append(Block(config, use_moe=use_moe))
             blocks = nn.ModuleList(blocks)
+
+        for i, block in enumerate(blocks):
+            if isinstance(block.mlp, MOELayer):
+                block.mlp.router.layer_name = f"block_{i}.router"
+                block.mlp.experts.layer_name = f"block_{i}.expert_mlp"
+            else:
+                block.mlp.layer_name = f"block_{i}.dense_mlp"
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -629,8 +788,25 @@ class GPT(nn.Module):
 
         self.last_capacity_stats = MANAGER.aggregate_capacity_stats()
         MANAGER.reset_capacity_stats()
+        if self.collect_balance_metrics:
+            self.last_expert_balance_metrics = MANAGER.get_expert_balance_metrics()
+            self.last_neuron_balance_metrics = MANAGER.get_neuron_balance_metrics()
+        else:
+            self.last_expert_balance_metrics = None
+            self.last_neuron_balance_metrics = None
+        MANAGER.reset_expert_balance_metrics()
+        MANAGER.reset_neuron_balance_metrics()
 
         return logits, loss
+
+    def set_balance_metric_tracking(self, enabled: bool):
+        self.collect_balance_metrics = enabled
+        for block in self.transformer.h:
+            if isinstance(block.mlp, MOELayer):
+                block.mlp.router.collect_balance_metrics = enabled
+                block.mlp.experts.collect_balance_metrics = enabled
+            else:
+                block.mlp.collect_balance_metrics = enabled
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary

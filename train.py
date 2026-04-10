@@ -21,6 +21,7 @@ import os
 # os.environ['NCCL_IGNORE_DISABLED_P2P'] = '1'
 import time
 import math
+import json
 import pickle
 from contextlib import nullcontext
 
@@ -38,6 +39,7 @@ from model import GPTConfig, GPT
 # I/O
 out_dir = 'out'
 eval_interval = 2000
+metric_eval_interval = 200 # <= 0 means "same as eval_interval"
 log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
@@ -78,6 +80,7 @@ reinforce_loss_weight = 1.0
 train_capacity = 1.25
 eval_capacity = 2.0
 min_capacity = 4
+usage_ema_beta = 0.99
 stride = 2
 use_switch_tfm_init = False
 switch_tfm_init_scale = 1.0  # recommended 0.1 for stability (pg.10, https://arxiv.org/abs/2101.03961)
@@ -110,6 +113,10 @@ exec(open('configurator.py').read()) # overrides from command line or config fil
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 print(config)
 # -----------------------------------------------------------------------------
+
+if metric_eval_interval <= 0:
+    metric_eval_interval = eval_interval
+    config['metric_eval_interval'] = metric_eval_interval
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
@@ -186,7 +193,7 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
                   use_straight_through_routing=use_straight_through_routing,
                   aux_loss_weight=aux_loss_weight, router_z_loss_weight=router_z_loss_weight,
                   reinforce_loss_weight=reinforce_loss_weight, train_capacity=train_capacity,
-                  eval_capacity=eval_capacity, min_capacity=min_capacity, stride=stride,
+                  eval_capacity=eval_capacity, min_capacity=min_capacity, usage_ema_beta=usage_ema_beta, stride=stride,
                   use_switch_tfm_init=use_switch_tfm_init, switch_tfm_init_scale=switch_tfm_init_scale,
                   router_use_full_prec=router_use_full_prec) # start with model_args from command line
 print('\n\n')
@@ -221,7 +228,14 @@ elif init_from == 'resume':
     for k,v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
+    load_result = model.load_state_dict(state_dict, strict=False)
+    allowed_missing = ('expert_usage_ema', 'neuron_usage_ema')
+    missing_keys = [k for k in load_result.missing_keys if not k.endswith(allowed_missing)]
+    if missing_keys or load_result.unexpected_keys:
+        raise RuntimeError(
+            f"Unexpected checkpoint key mismatch. Missing: {missing_keys}, "
+            f"Unexpected: {load_result.unexpected_keys}"
+        )
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
 elif init_from.startswith('gpt2'):
@@ -258,32 +272,74 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
+def flatten_balance_summary(metrics, prefix):
+    if metrics is None:
+        return {}
+    summary = metrics.get('summary', {})
+    flat = {}
+    for layer_type, layer_metrics in summary.items():
+        for key, value in layer_metrics.items():
+            flat[f"{prefix}/{layer_type}/{key}"] = float(value)
+    return flat
+
 @torch.no_grad()
-def estimate_loss():
+def estimate_loss(collect_balance_metrics=False):
     out = {}
+    raw_model_eval = model.module if ddp else model
+    raw_model_eval.set_balance_metric_tracking(collect_balance_metrics)
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         capacity_sums = None
         capacity_count = 0
+        expert_balance_sums = None
+        neuron_balance_sums = None
+        balance_count = 0
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
                 _, loss = model(X, Y)
             losses[k] = loss.item()
-            stats = (model.module if ddp else model).last_capacity_stats
+            stats = raw_model_eval.last_capacity_stats
             if stats is not None:
                 if capacity_sums is None:
                     capacity_sums = {key: 0.0 for key in stats}
                 for key, value in stats.items():
                     capacity_sums[key] += float(value)
                 capacity_count += 1
+            expert_summary = flatten_balance_summary(raw_model_eval.last_expert_balance_metrics, f"{split}/expert_balance")
+            neuron_summary = flatten_balance_summary(raw_model_eval.last_neuron_balance_metrics, f"{split}/neuron_balance")
+            if expert_summary or neuron_summary:
+                if expert_balance_sums is None:
+                    expert_balance_sums = {key: 0.0 for key in expert_summary}
+                if neuron_balance_sums is None:
+                    neuron_balance_sums = {key: 0.0 for key in neuron_summary}
+                for key, value in expert_summary.items():
+                    expert_balance_sums[key] += value
+                for key, value in neuron_summary.items():
+                    neuron_balance_sums[key] += value
+                balance_count += 1
         out[split] = losses.mean()
         if capacity_sums is not None and capacity_count > 0:
             for key, value in capacity_sums.items():
                 out[f"{split}/{key}"] = value / capacity_count
+        if balance_count > 0:
+            for metric_sums in [expert_balance_sums, neuron_balance_sums]:
+                if metric_sums is None:
+                    continue
+                for key, value in metric_sums.items():
+                    out[key] = value / balance_count
     model.train()
+    raw_model_eval.set_balance_metric_tracking(False)
     return out
+
+def save_eval_metrics(metrics, iteration, learning_rate_value, output_dir):
+    payload = {"iter": int(iteration), "lr": float(learning_rate_value)}
+    for key, value in metrics.items():
+        payload[key] = float(value)
+    metrics_path = os.path.join(output_dir, 'eval_metrics.jsonl')
+    with open(metrics_path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(payload, sort_keys=True) + '\n')
 
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(it):
@@ -309,6 +365,7 @@ X, Y = get_batch('train') # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
+raw_model.set_balance_metric_tracking(False)
 running_mfu = -1.0
 while True:
 
@@ -319,7 +376,8 @@ while True:
 
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
-        losses = estimate_loss()
+        collect_balance_metrics = (iter_num % metric_eval_interval) == 0
+        losses = estimate_loss(collect_balance_metrics=collect_balance_metrics)
         capacity_msg = ""
         if 'train/frac_at_limit' in losses:
             capacity_msg = (
@@ -329,6 +387,7 @@ while True:
                 f", val drop frac {losses['val/dropped_fraction']:.3f}"
             )
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}{capacity_msg}")
+        save_eval_metrics(losses, iter_num, lr, out_dir)
         if wandb_log:
             metrics = {
                 "iter": iter_num,
