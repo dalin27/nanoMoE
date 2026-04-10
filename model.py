@@ -12,6 +12,7 @@ import math
 import inspect
 from dataclasses import dataclass
 from contextlib import nullcontext
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -131,6 +132,14 @@ class Router(nn.Module):
         self.min_capacity = config.min_capacity
         self.router_use_full_prec = config.router_use_full_prec
         self.usage_ema_beta = config.usage_ema_beta
+        self.use_loss_free_expert_balance = config.use_loss_free_expert_balance
+        self.expert_balance_beta = config.expert_balance_beta
+        self.expert_balance_eta = config.expert_balance_eta
+        self.expert_balance_lambda_min = config.expert_balance_lambda_min
+        self.expert_balance_lambda_max = config.expert_balance_lambda_max
+        self.expert_balance_warmup_steps = config.expert_balance_warmup_steps
+        self.expert_balance_use_accepted_usage = config.expert_balance_use_accepted_usage
+        self.expert_balance_target = config.expert_balance_target
         self.layer_name = None
 
         # auxiliary / load balancing loss settings
@@ -139,6 +148,8 @@ class Router(nn.Module):
         self.use_reinforce_routing = config.use_reinforce_routing
         self.use_straight_through_routing = config.use_straight_through_routing
         self.register_buffer("expert_usage_ema", torch.zeros(self.n_exp))
+        self.register_buffer("lambda_expert", torch.zeros(self.n_exp))
+        self.register_buffer("balance_step", torch.zeros((), dtype=torch.long))
         self.collect_balance_metrics = True
 
         # linear projection for (noisy) softmax gating
@@ -174,11 +185,13 @@ class Router(nn.Module):
 
             # eq (4) in (https://arxiv.org/abs/1701.06538)
             logits = self.w_g(x)  # [B, T, n_exp]
+            routing_logits = logits - self.lambda_expert if self.use_loss_free_expert_balance else logits
             if self.w_noise is not None:
                 # optionally add noise into the router
                 noise = F.softplus(self.w_noise(x))
                 noise *= torch.randn_like(noise)
                 logits += noise
+                routing_logits += noise
 
             # router z loss, computed on logits (before softmax)
             # this loss prevents router logits from becoming too large
@@ -193,17 +206,17 @@ class Router(nn.Module):
 
             if route_mode == 'topk':
                 # find top k experts for each token
-                top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1) # [B, T, k]
+                top_k_logits, top_k_indices = routing_logits.topk(self.top_k, dim=-1) # [B, T, k]
 
                 # Shazeer et al (https://arxiv.org/abs/1701.06538) does only top-k
-                dispatch_probs = torch.full_like(logits, float('-inf'))  # [B, T, n_exp]
+                dispatch_probs = torch.full_like(routing_logits, float('-inf'))  # [B, T, n_exp]
                 dispatch_probs.scatter_(-1, top_k_indices, top_k_logits)
                 dispatch_probs = F.softmax(dispatch_probs, dim=-1)
                 aux_probs = dispatch_probs
                 chosen_indices = top_k_indices
             else:
                 # Sample k distinct experts without replacement from the full router distribution.
-                full_probs = F.softmax(logits, dim=-1)
+                full_probs = F.softmax(routing_logits, dim=-1)
                 flat_probs = full_probs.reshape(-1, self.n_exp).float()
                 chosen_indices = torch.multinomial(flat_probs, num_samples=self.top_k, replacement=False)
                 chosen_indices = chosen_indices.view(B, T, self.top_k)
@@ -260,15 +273,12 @@ class Router(nn.Module):
                 'dropped_fraction': (1.0 - used_capacity.sum().float() / (self.top_k * num_tokens)).detach(),
             })
             with torch.no_grad():
-                expert_usage_attempted, expert_balance_metrics = self.build_expert_balance_metrics(
+                expert_usage_attempted, expert_usage_current, expert_usage_target, expert_balance_metrics = self.build_expert_balance_metrics(
                     attempted_assignments=attempted_assignments,
                     accepted_assignments=used_capacity,
                     exp_capacity=exp_capacity,
                     num_tokens=num_tokens,
                 )
-                if self.training and self.collect_balance_metrics:
-                    _update_ema_buffer(self.expert_usage_ema, expert_usage_attempted, self.usage_ema_beta)
-                    expert_balance_metrics["expert_usage_ema"] = self.expert_usage_ema.detach()
                 if self.collect_balance_metrics and self.layer_name is not None:
                     MANAGER.add_expert_balance_metrics(self.layer_name, expert_balance_metrics)
 
@@ -338,7 +348,22 @@ class Router(nn.Module):
         accepted_assignments = accepted_assignments.float()
         expert_usage_attempted = attempted_assignments / num_tokens
         expert_usage_accepted = accepted_assignments / num_tokens
-        expert_usage_target = expert_usage_attempted.new_tensor(self.top_k / self.n_exp)
+        expert_usage_target_value = self.expert_balance_target if self.expert_balance_target is not None else self.top_k / self.n_exp
+        expert_usage_target = expert_usage_attempted.new_full((self.n_exp,), expert_usage_target_value)
+        expert_usage_current = expert_usage_accepted if self.expert_balance_use_accepted_usage else expert_usage_attempted
+
+        if self.training:
+            if self.use_loss_free_expert_balance:
+                if int(self.balance_step.item()) >= self.expert_balance_warmup_steps:
+                    self.expert_usage_ema.mul_(1.0 - self.expert_balance_beta).add_(
+                        expert_usage_current.detach(),
+                        alpha=self.expert_balance_beta,
+                    )
+                    lambda_update = self.lambda_expert + self.expert_balance_eta * (self.expert_usage_ema - expert_usage_target)
+                    self.lambda_expert.copy_(lambda_update.clamp(self.expert_balance_lambda_min, self.expert_balance_lambda_max))
+                self.balance_step.add_(1)
+            elif self.collect_balance_metrics:
+                _update_ema_buffer(self.expert_usage_ema, expert_usage_attempted, self.usage_ema_beta)
 
         mean_attempted = expert_usage_attempted.mean()
         mean_accepted = expert_usage_accepted.mean()
@@ -348,8 +373,18 @@ class Router(nn.Module):
         metrics = {
             "expert_usage_attempted": expert_usage_attempted.detach(),
             "expert_usage_accepted": expert_usage_accepted.detach(),
-            "expert_usage_target": expert_usage_target.detach(),
+            "expert_usage_current": expert_usage_current.detach(),
+            "expert_usage_target": expert_usage_target.mean().detach(),
             "expert_usage_ema": self.expert_usage_ema.detach(),
+            "lambda_expert": self.lambda_expert.detach(),
+            "lambda_expert_min": self.lambda_expert.min().detach(),
+            "lambda_expert_mean": self.lambda_expert.mean().detach(),
+            "lambda_expert_max": self.lambda_expert.max().detach(),
+            "lambda_expert_std": self.lambda_expert.std(unbiased=False).detach(),
+            "expert_usage_ema_mean": self.expert_usage_ema.mean().detach(),
+            "expert_usage_ema_std": self.expert_usage_ema.std(unbiased=False).detach(),
+            "l1_expert_usage_ema_vs_target": torch.abs(self.expert_usage_ema - expert_usage_target).sum().detach(),
+            "l1_expert_usage_current_vs_target": torch.abs(expert_usage_current - expert_usage_target).sum().detach(),
             "fraction_experts_at_capacity": fraction_experts_at_capacity.detach(),
             "assignment_drop_fraction": assignment_drop_fraction.detach(),
             "max_expert_usage_attempted_over_mean": (
@@ -369,7 +404,7 @@ class Router(nn.Module):
                 expert_usage_accepted,
             ).detach(),
         }
-        return expert_usage_attempted, metrics
+        return expert_usage_attempted, expert_usage_current, expert_usage_target, metrics
     
     def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
         """
@@ -592,6 +627,14 @@ class GPTConfig:
     use_noisy_top_k: bool = False # only used when router_selection == 'topk'
     use_reinforce_routing: bool = False # add an exact REINFORCE term for sorted sampled routing
     use_straight_through_routing: bool = False # use a support-restricted straight-through gradient for sampled routing
+    use_loss_free_expert_balance: bool = False # expert-only loss-free balancing controller
+    expert_balance_beta: float = 0.99
+    expert_balance_eta: float = 0.1
+    expert_balance_lambda_min: float = -5.0
+    expert_balance_lambda_max: float = 5.0
+    expert_balance_warmup_steps: int = 0
+    expert_balance_use_accepted_usage: bool = False
+    expert_balance_target: Optional[float] = None
     aux_loss_weight: float = 0.01 # default setting from Switch Transformer (see top of page 8)
     router_z_loss_weight: float = 0.001 # default setting from ST-MoE (see page 8 eq. 6)
     reinforce_loss_weight: float = 1.0

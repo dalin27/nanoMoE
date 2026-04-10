@@ -74,6 +74,14 @@ use_router_z_loss = False
 use_noisy_top_k = False
 use_reinforce_routing = False
 use_straight_through_routing = False
+use_loss_free_expert_balance = False
+expert_balance_beta = 0.99
+expert_balance_eta = 0.1
+expert_balance_lambda_min = -5.0
+expert_balance_lambda_max = 5.0
+expert_balance_warmup_steps = 0
+expert_balance_use_accepted_usage = False
+expert_balance_target = None
 aux_loss_weight = 0.001
 router_z_loss_weight = 0.01
 reinforce_loss_weight = 1.0
@@ -108,7 +116,12 @@ device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
-config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
+config_keys = [
+    k for k, v in globals().items()
+    if not k.startswith('_') and (
+        isinstance(v, (int, float, bool, str)) or (k == 'expert_balance_target' and v is None)
+    )
+]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 print(config)
@@ -191,6 +204,13 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
                   use_aux_loss=use_aux_loss, use_router_z_loss=use_router_z_loss,
                   use_noisy_top_k=use_noisy_top_k, use_reinforce_routing=use_reinforce_routing,
                   use_straight_through_routing=use_straight_through_routing,
+                  use_loss_free_expert_balance=use_loss_free_expert_balance,
+                  expert_balance_beta=expert_balance_beta, expert_balance_eta=expert_balance_eta,
+                  expert_balance_lambda_min=expert_balance_lambda_min,
+                  expert_balance_lambda_max=expert_balance_lambda_max,
+                  expert_balance_warmup_steps=expert_balance_warmup_steps,
+                  expert_balance_use_accepted_usage=expert_balance_use_accepted_usage,
+                  expert_balance_target=expert_balance_target,
                   aux_loss_weight=aux_loss_weight, router_z_loss_weight=router_z_loss_weight,
                   reinforce_loss_weight=reinforce_loss_weight, train_capacity=train_capacity,
                   eval_capacity=eval_capacity, min_capacity=min_capacity, usage_ema_beta=usage_ema_beta, stride=stride,
