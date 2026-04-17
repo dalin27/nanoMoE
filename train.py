@@ -33,10 +33,13 @@ from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
 
+from dotenv import load_dotenv
+
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = 'out'
+load_dotenv()
+out_dir = 'checkpoints'
 eval_interval = 2000
 log_interval = 1
 eval_iters = 200
