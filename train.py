@@ -46,7 +46,7 @@ init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 
 # wandb logging
 wandb_log = True # False # disabled by default
-wandb_project = 'nano-moe'
+wandb_project = 'cs-628-moe'
 wandb_run_name = 'gpt2-124M-owt' + str(time.time())
 
 # data
