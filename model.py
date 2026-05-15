@@ -142,7 +142,7 @@ class Router(nn.Module):
             avg_router_logit = top_k_logits.mean().detach()
 
             MANAGER.add_max_router_stats(max_router_logit)
-            MANAGER.add_avg_router_stats(avg_router_logit)
+            MANAGER.add_mean_router_stats(avg_router_logit)
 
             router_probs = F.softmax(router_probs, dim=-1)
 
