@@ -42,6 +42,7 @@ load_dotenv()
 out_dir = 'checkpoints'
 eval_interval = 2000
 log_interval = 1
+wandb_interval = 200
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
@@ -325,6 +326,7 @@ while True:
                 }
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+
     if iter_num == 0 and eval_only:
         break
 
@@ -365,7 +367,17 @@ while True:
         if local_iter_num >= 5: # let the training loop settle a bit
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
+        
+        if wandb_log and iter_num % wandb_interval == 0:
+            wandb.log({
+                "iter": iter_num,
+                "train/loss_instant": lossf,  
+                "charts/lr": lr,
+                "charts/mfu": running_mfu * 100,
+            })
+            
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+
     iter_num += 1
     local_iter_num += 1
 
