@@ -137,6 +137,13 @@ class Router(nn.Module):
             # see page 4 eq (3)-(5), the code for this is commented out below
             router_probs = torch.full_like(logits, float('-inf'))  # [B, T, n_exp]
             router_probs.scatter_(-1, top_k_indices, top_k_logits)
+
+            max_router_logit = top_k_logits.max().detach()
+            avg_router_logit = top_k_logits.mean().detach()
+
+            MANAGER.add_max_router_stats(max_router_logit)
+            MANAGER.add_avg_router_stats(avg_router_logit)
+
             router_probs = F.softmax(router_probs, dim=-1)
 
             # # normalize all router logits (not just top-k) via softmax      
@@ -501,6 +508,9 @@ class GPT(nn.Module):
             x = block(x)
         x = self.transformer.ln_f(x)
 
+        aux_loss_val = torch.tensor(0.0, device=device)
+        z_loss_val = torch.tensor(0.0, device=device)
+
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
@@ -508,17 +518,21 @@ class GPT(nn.Module):
 
             # add the auxiliary load balancing loss and router z loss to the main loss
             if self.config.n_exp > 1 and self.config.use_aux_loss:
-                loss += self.config.aux_loss_weight * MANAGER.aggregate_aux_loss()
+                aux_loss_val = MANAGER.aggregate_aux_loss()
+                loss += self.config.aux_loss_weight * aux_loss_val
                 MANAGER.reset_aux_loss()
             if self.config.n_exp > 1 and self.config.use_router_z_loss:
-                loss += self.config.router_z_loss_weight * MANAGER.aggregate_router_z_loss()
+                z_loss_val = MANAGER.aggregate_router_z_loss()
+                loss += self.config.router_z_loss_weight * z_loss_val
                 MANAGER.reset_router_z_loss()
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
 
-        return logits, loss
+        max_logit, avg_logit = MANAGER.get_router_stats()
+
+        return logits, loss, aux_loss_val, z_loss_val, max_logit, avg_logit
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary

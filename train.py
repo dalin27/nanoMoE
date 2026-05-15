@@ -42,7 +42,7 @@ load_dotenv()
 out_dir = 'checkpoints'
 eval_interval = 2000
 log_interval = 1
-wandb_interval = 200
+wandb_interval = 50
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
@@ -67,10 +67,10 @@ dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 
 # moe
-n_exp = 1 # if n_exp = 1 we just use regular MLP layers
+n_exp = 64 # if n_exp = 1 we just use regular MLP layers
 top_k = 2
-use_aux_loss = False
-use_router_z_loss = False
+use_aux_loss = True
+use_router_z_loss = True
 use_noisy_top_k = False
 aux_loss_weight = 0.001
 router_z_loss_weight = 0.01
@@ -80,7 +80,7 @@ min_capacity = 4
 stride = 2
 use_switch_tfm_init = False
 switch_tfm_init_scale = 1.0  # recommended 0.1 for stability (pg.10, https://arxiv.org/abs/2101.03961)
-router_use_full_prec = False
+router_use_full_prec = True
 
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
@@ -260,12 +260,15 @@ def estimate_loss():
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
+        aux_losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                _, loss = model(X, Y)
+                _, loss, aux, z  = model(X, Y)
             losses[k] = loss.item()
+            aux_losses[k] = aux.item()
         out[split] = losses.mean()
+        out[f"{split}_aux"] = aux.mean()
     model.train()
     return out
 
@@ -310,8 +313,10 @@ while True:
                 "iter": iter_num,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
-                "lr": lr,
-                "mfu": running_mfu*100, # convert to percentage
+                "train/aux_loss": losses['train_aux'],
+                "val/z_loss": losses['val_aux'],
+                "charts/lr": lr,
+                "charts/mfu": running_mfu*100, # convert to percentage
             })
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
@@ -329,6 +334,12 @@ while True:
 
     if iter_num == 0 and eval_only:
         break
+    
+    running_max_l = -float('inf')
+    running_mean_r_l = 0
+    running_aux = 0.0
+    running_z = 0.0 
+    loss = 0.0
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
@@ -340,21 +351,24 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
-            loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            logits, loss, aux_loss_val, z_loss_val, max_r_l, mean_r_l = model(X, Y)
+            loss = loss / gradient_accumulation_steps 
+            running_aux += aux_loss_val.item() / gradient_accumulation_steps
+            running_z += z_loss_val.item() / gradient_accumulation_steps
+            running_max_r_l = max(running_max_r_l, max_r_l.item())
+            running_mean_r_l += mean_r_l.item() / gradient_accumulation_steps
+            # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
+
     # clip the gradient
+    total_norm = 0.0
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    # step the optimizer and scaler if training in fp16
-    scaler.step(optimizer)
-    scaler.update()
-    # flush the gradients as soon as we can, no need for this memory anymore
-    optimizer.zero_grad(set_to_none=True)
+        total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        total_norm.item()
 
     # timing and logging
     t1 = time.time()
@@ -369,14 +383,26 @@ while True:
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         
         if wandb_log and iter_num % wandb_interval == 0:
+            
             wandb.log({
                 "iter": iter_num,
-                "train/loss_instant": lossf,  
+                "train/loss_instant": lossf, 
+                "train/aux_loss": running_aux,
+                "train/z_loss": running_z, 
                 "charts/lr": lr,
                 "charts/mfu": running_mfu * 100,
+                "router/max_logit": running_max_r_l,
+                "router/avg_logit": running_mean_r_l,
+                "charts/grad_norm": total_norm
             })
-            
+
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+    
+    # step the optimizer and scaler if training in fp16
+    scaler.step(optimizer)
+    scaler.update()
+    # flush the gradients as soon as we can, no need for this memory anymore
+    optimizer.zero_grad(set_to_none=True)
 
     iter_num += 1
     local_iter_num += 1
