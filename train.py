@@ -264,7 +264,7 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                _, loss, aux, z  = model(X, Y)
+                _, loss, aux, z,_ , _  = model(X, Y)
             losses[k] = loss.item()
             aux_losses[k] = aux.item()
         out[split] = losses.mean()
