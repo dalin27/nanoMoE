@@ -335,7 +335,7 @@ while True:
     if iter_num == 0 and eval_only:
         break
     
-    running_max_l = -float('inf')
+    running_max_r_l = -float('inf')
     running_mean_r_l = 0
     running_aux = 0.0
     running_z = 0.0 
