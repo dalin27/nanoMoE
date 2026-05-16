@@ -69,8 +69,8 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 # moe
 n_exp = 64 # if n_exp = 1 we just use regular MLP layers
 top_k = 2
-use_aux_loss = True
-use_router_z_loss = True
+use_aux_loss = False
+use_router_z_loss = False
 use_noisy_top_k = False
 aux_loss_weight = 0.001
 router_z_loss_weight = 0.01
@@ -368,7 +368,7 @@ while True:
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
         total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        total_norm.item()
+        total_norm = total_norm.item()
 
     # timing and logging
     t1 = time.time()
