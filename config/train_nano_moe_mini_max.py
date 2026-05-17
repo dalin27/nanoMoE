@@ -37,8 +37,8 @@ n_head = 4       # Down from 12
 n_embd = 256     # Down from 768
 
 # 2. HIGH THROUGHPUT (Will easily fit in VRAM now)
-batch_size = 64  # High batch size feeds the router plenty of tokens
-gradient_accumulation_steps = 8 
+batch_size = 4  # High batch size feeds the router plenty of tokens
+gradient_accumulation_steps = 128
 
 # 3. EXPLODE THE EXPERTS (The Architecture Limit)
 n_exp = 128      # 128 tiny experts! 
