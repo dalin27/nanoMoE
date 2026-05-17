@@ -30,9 +30,9 @@ n_embd = 768
 
 # these make the total batch size be ~0.5M
 # 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
-batch_size = 64 #12
+batch_size = 16 #12
 block_size = 1024
-gradient_accumulation_steps = 8
+gradient_accumulation_steps = 32
 
 # this makes total number of tokens be 25B
 max_iters = 50000
