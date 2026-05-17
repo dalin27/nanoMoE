@@ -67,11 +67,11 @@ dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 
 # moe
-n_exp = 64 # if n_exp = 1 we just use regular MLP layers
+n_exp = 8 # if n_exp = 1 we just use regular MLP layers
 top_k = 2
-use_aux_loss = False
-use_router_z_loss = False
-use_noisy_top_k = False
+use_aux_loss = True
+use_router_z_loss = True
+use_noisy_top_k = True
 aux_loss_weight = 0.001
 router_z_loss_weight = 0.01
 train_capacity = 1.25
