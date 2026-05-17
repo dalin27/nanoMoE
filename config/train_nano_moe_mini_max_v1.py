@@ -6,7 +6,7 @@ import time
 
 wandb_log = True
 init_from = 'scratch'
-wandb_project = 'nano-moe'
+wandb_project = 'cs-628-moe'
 wandb_run_name ='gpt2-124M-moe-owt ' + time.strftime('%Y-%m-%d %H:%M:%S')
 
 
