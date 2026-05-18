@@ -264,7 +264,7 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                _, loss, aux, z,_ , _  = model(X, Y)
+                _, loss, aux, z,_ , _, _, _ = model(X, Y)
             losses[k] = loss.item()
             aux_losses[k] = aux.item()
         out[split] = losses.mean()
@@ -351,7 +351,7 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss, aux_loss_val, z_loss_val, max_r_l, mean_r_l = model(X, Y)
+            logits, loss, aux_loss_val, z_loss_val, max_r_l, mean_r_l, router_probs, dropped_tokens= model(X, Y)
             loss = loss / gradient_accumulation_steps 
             running_aux += aux_loss_val.item() / gradient_accumulation_steps
             running_z += z_loss_val.item() / gradient_accumulation_steps
@@ -383,6 +383,10 @@ while True:
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         
         if wandb_log and iter_num % wandb_interval == 0:
+
+            expert_assignments = torch.argmax(router_probs, dim=-1)
+            expert_counts = torch.bincount(expert_assignments, minlength=model.config.n_exp)
+            dead_experts = (expert_counts == 0).sum().item()
             
             wandb.log({
                 "iter": iter_num,
@@ -393,6 +397,9 @@ while True:
                 "charts/mfu": running_mfu * 100,
                 "router/max_logit": running_max_r_l,
                 "router/avg_logit": running_mean_r_l,
+                "router/expert_counts": wandb.Histogram(expert_counts.cpu().numpy()),
+                "router/dead_experts": dead_experts,
+                "router/dropped_tokens": dropped_tokens,
                 "charts/grad_norm": total_norm
             })
 

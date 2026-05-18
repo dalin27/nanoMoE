@@ -146,6 +146,9 @@ class Router(nn.Module):
 
             router_probs = F.softmax(router_probs, dim=-1)
 
+            MANAGER.add_router_probs(router_probs)
+
+
             # # normalize all router logits (not just top-k) via softmax      
             # router_probs = F.softmax(logits, dim=-1)
 
@@ -179,6 +182,15 @@ class Router(nn.Module):
             exp_mask *= torch.lt(exp_rank, exp_capacity) # [k, B * T, n_exp]
             used_capacity = torch.sum(exp_mask, dim=(0, 1)) # [n_exp]
 
+            total_routing_requests = num_tokens * self.top_k
+            # Nombre total de requêtes acceptées par les experts
+            total_accepted = used_capacity.sum().item()
+            # Les tokens qui ont été jetés dans le vide !
+            dropped_tokens = total_routing_requests - total_accepted
+            
+            # Tu devras ajouter cette fonction à ta classe MOEManager
+            MANAGER.add_dropped_tokens(dropped_tokens)
+
             # mask rank to only include tokens that are selected
             # perform a sum so each row only contains index of token
             # for the expert that is selected in that row
@@ -189,6 +201,8 @@ class Router(nn.Module):
             # mask probabilities to only include selected experts
             router_probs = router_probs.view(num_tokens, self.n_exp)[None, :] # [1, B * T, n_exp]
             exp_weights = exp_mask * router_probs # [k, B * T, n_exp]
+
+
 
             # convert rank into one-hot vectors over the available capacity
             # stores the position of each token within the capacity of the selected expert
@@ -530,9 +544,9 @@ class GPT(nn.Module):
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
 
-        max_logit, avg_logit = MANAGER.get_router_stats()
+        max_logit, avg_logit, router_probs, dropped_tokens = MANAGER.get_router_stats()
 
-        return logits, loss, aux_loss_val, z_loss_val, max_logit, avg_logit
+        return logits, loss, aux_loss_val, z_loss_val, max_logit, avg_logit, router_probs, dropped_tokens
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary

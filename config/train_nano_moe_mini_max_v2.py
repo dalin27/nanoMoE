@@ -51,4 +51,4 @@ use_aux_loss = False
 use_router_z_loss = False
 use_switch_tfm_init = False
 use_noisy_top_k = True
-learning_rate = 1e-2
+learning_rate = 6e-4 #V2.2 #1e-2 v2
