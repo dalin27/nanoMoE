@@ -41,6 +41,8 @@ class MOEManager:
         overall_mean = sum(self.mean_router_logits) / len(self.mean_router_logits)
 
         router_probs = self.router_probs
+
+        dropped_tokens = sum(t.item() for t in self.dropped_tokens) if hasattr(self, 'dropped_tokens') else 0
         
         # Reset for the next forward pass
         self.max_router_logits = []

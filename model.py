@@ -184,7 +184,7 @@ class Router(nn.Module):
 
             total_routing_requests = num_tokens * self.top_k
             # Nombre total de requêtes acceptées par les experts
-            total_accepted = used_capacity.sum().item()
+            total_accepted = used_capacity.sum()
             # Les tokens qui ont été jetés dans le vide !
             dropped_tokens = total_routing_requests - total_accepted
             
