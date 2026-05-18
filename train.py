@@ -383,8 +383,9 @@ while True:
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         
         if wandb_log and iter_num % wandb_interval == 0:
+            all_router_probs = torch.cat(router_probs, dim=0)
 
-            expert_assignments = torch.argmax(router_probs, dim=-1)
+            expert_assignments = torch.argmax(all_router_probs, dim=-1)
             expert_counts = torch.bincount(expert_assignments, minlength=model.config.n_exp)
             dead_experts = (expert_counts == 0).sum().item()
             
