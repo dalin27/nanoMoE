@@ -386,8 +386,10 @@ while True:
             all_router_probs = torch.cat(router_probs, dim=0)
 
             expert_assignments = torch.argmax(all_router_probs, dim=-1)
-            expert_counts = torch.bincount(expert_assignments, minlength=model.module.config.n_exp)           
+            expert_assignments_flat = expert_assignments.flatten()
+            expert_counts = torch.bincount(expert_assignments_flat, minlength=model.module.config.n_exp)            
             dead_experts = (expert_counts == 0).sum().item()
+           
             
             wandb.log({
                 "iter": iter_num,
