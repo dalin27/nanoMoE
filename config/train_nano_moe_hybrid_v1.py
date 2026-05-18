@@ -37,9 +37,9 @@ block_size = 1024
 
 # 2. H200 THROUGHPUT (The Speed Fix)
 # Thicker batch size = High GPU utilization. 
-batch_size = 32  
+batch_size = 16  
 # Low accumulation = Lightning fast weight updates (watch it crash quickly!)
-gradient_accumulation_steps = 4 
+gradient_accumulation_steps = 8 
 
 # 3. MOE CHAOS 
 n_exp = 64       
