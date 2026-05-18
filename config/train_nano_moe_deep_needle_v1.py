@@ -9,30 +9,12 @@ init_from = 'scratch'
 wandb_project = 'cs-628-moe'
 wandb_run_name ='gpt2-124M-moe-owt ' + time.strftime('%Y-%m-%d %H:%M:%S')
 
-# model/moe settings
-n_exp = 8
-top_k = 2
-use_aux_loss = True
-aux_loss_weight = 0.01
-use_router_z_loss = True
-router_z_loss_weight = 0.001
-use_noisy_top_k = True
-train_capacity = 1.25
+
 eval_capacity = 2.0
 stride = 2
-use_switch_tfm_init = True
-router_use_full_prec = True
-
-# use smaller GPT model
-n_layer = 6
-n_head = 6
-n_embd = 384
 
 # these make the total batch size be ~0.5M
 # 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
-batch_size = 12
-block_size = 1024
-gradient_accumulation_steps = 5 * 8
 
 # this makes total number of tokens be 25B
 max_iters = 50000
@@ -45,3 +27,25 @@ log_interval = 10
 
 # weight decay
 weight_decay = 1e-1
+
+# 1. small core
+n_layer = 48     
+n_head = 2
+n_embd = 64
+
+# 2. 
+batch_size = 2
+gradient_accumulation_steps = 256
+block_size = 1024
+
+
+# 3.
+n_exp = 64       
+top_k = 1 
+train_capacity = 10.0  #slack 
+
+# 4. 
+use_aux_loss = False
+use_router_z_loss = False
+use_switch_tfm_init = False
+use_noisy_top_k = True
