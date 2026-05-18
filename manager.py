@@ -42,7 +42,10 @@ class MOEManager:
 
         router_probs = self.router_probs
 
-        dropped_tokens = sum(t.item() for t in self.dropped_tokens) if hasattr(self, 'dropped_tokens') else 0
+        if hasattr(self, 'dropped_tokens') and len(self.dropped_tokens) > 0:
+            dropped_tokens = sum(self.dropped_tokens).item()
+        else:
+            dropped_tokens = 0
         
         # Reset for the next forward pass
         self.max_router_logits = []
