@@ -53,4 +53,4 @@ use_switch_tfm_init = False
 use_noisy_top_k = True
 
 # KEEP LEARNING RATE HIGH TO FORCE THE ISSUE
-learning_rate = 1e-2
+learning_rate = 2e-3
