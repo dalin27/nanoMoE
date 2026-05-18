@@ -15,6 +15,7 @@ stride = 2
 
 # these make the total batch size be ~0.5M
 # 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
+block_size = 1024
 
 # this makes total number of tokens be 25B
 max_iters = 50000
@@ -28,24 +29,28 @@ log_interval = 10
 # weight decay
 weight_decay = 1e-1
 
-# 1. small core
-n_layer = 48     
-n_head = 2
-n_embd = 64
-
-# 2. 
-batch_size = 2
-gradient_accumulation_steps = 256
+# 1. THE GOLDILOCKS CORE (Deep enough to explode, wide enough to be fast)
+n_layer = 16     # 16 is enough sequential routers to cause a cascade failure
+n_head = 4
+n_embd = 128     # Slightly wider to keep Tensor Cores fed
 block_size = 1024
 
+# 2. H200 THROUGHPUT (The Speed Fix)
+# Thicker batch size = High GPU utilization. 
+batch_size = 32  
+# Low accumulation = Lightning fast weight updates (watch it crash quickly!)
+gradient_accumulation_steps = 4 
 
-# 3.
+# 3. MOE CHAOS 
 n_exp = 64       
 top_k = 1 
-train_capacity = 10.0  #slack 
+train_capacity = 10.0  
 
-# 4. 
+# 4. SAFETY OFF
 use_aux_loss = False
 use_router_z_loss = False
 use_switch_tfm_init = False
 use_noisy_top_k = True
+
+# KEEP LEARNING RATE HIGH TO FORCE THE ISSUE
+learning_rate = 1e-2
