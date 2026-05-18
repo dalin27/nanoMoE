@@ -45,7 +45,7 @@ top_k = 1
 train_capacity = 10.0  #slack 
 
 # 4. 
-use_aux_loss = True #False 
+use_aux_loss = False #False 
 use_router_z_loss = False
 use_switch_tfm_init = False
 use_noisy_top_k = True
