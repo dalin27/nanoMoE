@@ -30,22 +30,25 @@ log_interval = 10
 # weight decay
 weight_decay = 1e-1
 
-# 1. SHRINK THE CORE (Tiny memory footprint)
 n_layer = 2
 n_head = 2
 n_embd = 64
-block_size = 512    # Down from 768
+block_size = 512
 
-batch_size = 1
-gradient_accumulation_steps = 1024
+# 2. H200 THROUGHPUT CALIBRATION (The sweet spot)
+# A batch of 16 keeps the GPUs fed without triggering the 256GB memory crash.
+batch_size = 16 
+# Lower accumulation means we update the weights faster to see the explosion sooner!
+gradient_accumulation_steps = 8 
 
-# 2. HIGH THROUGHPUT (Will easily fit in VRAM now)
+# 3. THE SINGULARITY (Extreme architectural fragmentation)
 n_exp = 1024     # 1,024 separate experts!
 top_k = 1        # Hard routing: only 1 expert chosen per token
-train_capacity = 100.0  # Massive slack: allows the router to send almost everything to 1 expert if it wants to
+train_capacity = 100.0  # Infinite slack
 
-# 4. THE DANGER ZONE (The Math Limit)
+# 4. THE DETONATOR (Guaranteed mathematical collapse)
 use_aux_loss = False
 use_router_z_loss = False
 use_switch_tfm_init = False
 use_noisy_top_k = True
+learning_rate = 1e-2

@@ -28,24 +28,24 @@ log_interval = 10
 # weight decay
 weight_decay = 1e-1
 
-# 1. SHRINK THE CORE (Tiny memory footprint)
-n_layer = 48     # 48 sequential routing decisions!
+# 1. small core
+n_layer = 48     
 n_head = 2
 n_embd = 64
 block_size = 512   # Down from 768
 
-# 2. HIGH THROUGHPUT (Will easily fit in VRAM now)
+# 2. 
 batch_size = 2
 gradient_accumulation_steps = 256
 block_size = 1024
 
 
-# 3. EXPLODE THE EXPERTS (The Architecture Limit)
-n_exp = 64       # Dropped from 1024 so the forward pass doesn't take all day
+# 3.
+n_exp = 64       
 top_k = 1 
-train_capacity = 10.0  # Massive slack: allows the router to send almost everything to 1 expert if it wants to
+train_capacity = 10.0  #slack 
 
-# 4. THE DANGER ZONE (The Math Limit)
+# 4. 
 use_aux_loss = False
 use_router_z_loss = False
 use_switch_tfm_init = False
