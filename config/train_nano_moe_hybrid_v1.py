@@ -30,7 +30,7 @@ log_interval = 10
 weight_decay = 1e-1
 
 # 1. THE GOLDILOCKS CORE (Deep enough to explode, wide enough to be fast)
-n_layer = 16     # 16 is enough sequential routers to cause a cascade failure
+n_layer = 24     # 16 is enough sequential routers to cause a cascade failure
 n_head = 4
 n_embd = 128     # Slightly wider to keep Tensor Cores fed
 block_size = 1024
@@ -44,7 +44,7 @@ gradient_accumulation_steps = 8
 # 3. MOE CHAOS 
 n_exp = 64       
 top_k = 1 
-train_capacity = 10.0  
+train_capacity = 1.0 #10.0 
 
 # 4. SAFETY OFF
 use_aux_loss = False
@@ -53,4 +53,4 @@ use_switch_tfm_init = False
 use_noisy_top_k = True
 
 # KEEP LEARNING RATE HIGH TO FORCE THE ISSUE
-learning_rate = 2e-3
+learning_rate = 6e-4
