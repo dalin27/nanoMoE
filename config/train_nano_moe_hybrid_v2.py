@@ -40,11 +40,16 @@ block_size = 1024
 batch_size = 16  
 # Low accumulation = Lightning fast weight updates (watch it crash quickly!)
 gradient_accumulation_steps = 8 
+gpu_count = 4
 
 # 3. MOE CHAOS 
 n_exp = 64       
 top_k = 1 
 train_capacity = 1.0 #10.0 
+
+tokens_batch = batch_size * block_size * gradient_accumulation_steps * gpu_count
+tokens_expert = tokens_batch / n_exp
+if False: print(f'tokens, per batch: {tokens_batch}; per expert: {tokens_expert}')
 
 # 4. SAFETY OFF
 use_aux_loss = False
