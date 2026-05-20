@@ -33,8 +33,8 @@ n_embd = 384
 # 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
 batch_size = 32
 block_size = 1024
-gradient_accumulation_steps = 32
-gpu_count = 1
+gradient_accumulation_steps = 16
+gpu_count = 2
 
 tokens_iter = batch_size * block_size * gradient_accumulation_steps * gpu_count
 tokens_expert = tokens_iter * top_k / n_exp
