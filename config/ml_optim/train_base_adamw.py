@@ -11,11 +11,11 @@ wandb_run_name ='gpt2-124M-moe-owt ' + time.strftime('%Y-%m-%d %H:%M:%S')
 
 # model/moe settings
 n_exp = 64
-top_k = 1
+top_k = 1 #2
 use_aux_loss = True
-aux_loss_weight = 0.01
+aux_loss_weight = 0.1 #0.05
 use_router_z_loss = True
-router_z_loss_weight = 0.001
+router_z_loss_weight = 0.01 
 use_noisy_top_k = True
 train_capacity = 1.5
 eval_capacity = 2.0
