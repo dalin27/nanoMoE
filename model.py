@@ -617,7 +617,7 @@ class GPT(nn.Module):
 
         return model
 
-    def configure_optimizers(self, optimizer_choice, weight_decay, learning_rate, betas, device_type, momentum = 0.9):
+    def configure_optimizers(self, optimizer_choice, weight_decay, learning_rate, betas, device_type, momentum, nesterov):
         # TODO: add expert config
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
@@ -677,6 +677,7 @@ class GPT(nn.Module):
                 optim_groups, 
                 lr=learning_rate, 
                 momentum=momentum,
+                nesterov=nesterov,
                 **extra_args
             )
         

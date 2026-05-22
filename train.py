@@ -90,7 +90,8 @@ weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
-momentum = 0.9
+momentum = 0
+nesterov = False
 
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
@@ -251,7 +252,7 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
-optimizer = model.configure_optimizers(optimizer_choice,weight_decay, learning_rate, (beta1, beta2), device_type, momentum)
+optimizer = model.configure_optimizers(optimizer_choice,weight_decay, learning_rate, (beta1, beta2), device_type, momentum, nesterov)
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
