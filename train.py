@@ -29,7 +29,7 @@ import torch
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
+from torch.distributed import init_process_group, destroy_process_group, broadcast
 
 from model import GPTConfig, GPT
 
@@ -83,18 +83,22 @@ switch_tfm_init_scale = 1.0  # recommended 0.1 for stability (pg.10, https://arx
 router_use_full_prec = True
 
 # adamw optimizer
+optimizer_choice = 'adamw'
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+momentum = 0.9
 
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 2000 # how many steps to warm up for
 lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
 min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+
+gpu_count = 1
 
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -107,6 +111,15 @@ compile = True # use PyTorch 2.0 to compile the model to be faster
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
+
+tokens_iter = int(batch_size * block_size * gradient_accumulation_steps * gpu_count)
+tokens_expert = int(tokens_iter * top_k / n_exp)
+limit_expert = int(tokens_expert * train_capacity)
+
+config['moe_meta/tokens_iter'] = tokens_iter
+config['moe_meta/tokens_expert_ideal'] = tokens_expert
+config['moe_meta/limit_expert'] = limit_expert
+
 print(config)
 # -----------------------------------------------------------------------------
 
@@ -238,7 +251,7 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # optimizer
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+optimizer = model.configure_optimizers(optimizer_choice,weight_decay, learning_rate, (beta1, beta2), device_type, momentum)
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
@@ -261,14 +274,17 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         aux_losses = torch.zeros(eval_iters)
+        z_losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
                 _, loss, aux, z,_ , _, _, _ = model(X, Y)
             losses[k] = loss.item()
             aux_losses[k] = aux.item()
+            z_losses[k] = z.item()
         out[split] = losses.mean()
         out[f"{split}_aux"] = aux.mean()
+        out[f"{split}_z"] = z.mean()
     model.train()
     return out
 
@@ -297,8 +313,37 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
-while True:
 
+stop_file_path = os.path.join(os.getcwd(), 'STOP')
+
+while True:
+    #manual stop
+    stop_training = torch.tensor(0, dtype=torch.int32, device=device)
+    if master_process:
+        if os.path.exists(stop_file_path):
+            print(f"\n[MANUAL STOP DETECTED] Fichier '{stop_file_path}' trouvé. Préparation de la sortie...")
+            stop_training += 1
+            try: os.remove(stop_file_path)
+            except OSError: pass
+
+    if ddp:
+        # On propage le signal d'arrêt à tous les workers pour éviter un blocage
+        broadcast(stop_training, src=0)
+        
+    if stop_training.item() > 0:
+        if master_process:
+            print("Sauvegarde du checkpoint d'urgence...")
+            checkpoint = {
+                'model': raw_model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'model_args': model_args,
+                'iter_num': iter_num,
+                'best_val_loss': best_val_loss,
+                'config': config,
+            }
+            torch.save(checkpoint, os.path.join(out_dir, 'ckpt_manual_stop.pt'))
+            print("Checkpoint sauvegardé avec succès. Sortie.")
+        break
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
@@ -309,15 +354,31 @@ while True:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
-            wandb.log({
+            eval_metrics = {
                 "iter": iter_num,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
-                "train/aux_loss": losses['train_aux'],
-                "val/z_loss": losses['val_aux'],
+                "val/aux_loss": losses['val_aux'],
+                "val/z_loss" : losses['val_z'],
                 "charts/lr": lr,
                 "charts/mfu": running_mfu*100, # convert to percentage
-            })
+            }
+
+            for layer_idx, probs in enumerate(router_probs):
+                probs_flat = probs.view(-1, probs.size(-1))
+                
+                entropy_per_token = -torch.sum(probs_flat * torch.log(probs_flat + 1e-10), dim=-1)
+                
+                expert_assignments = torch.argmax(probs_flat, dim=-1)
+                expert_counts = torch.bincount(expert_assignments, minlength=raw_model.config.n_exp)
+                dead_experts = (expert_counts == 0).sum().item()
+                
+                eval_metrics[f"router/layer_{layer_idx}/entropy"] = entropy_per_token.mean().item()
+                eval_metrics[f"router/layer_{layer_idx}/dead_experts"] = dead_experts
+                eval_metrics[f"router/layer_{layer_idx}/expert_counts"] = wandb.Histogram(expert_counts.cpu().numpy())
+
+            wandb.log(eval_metrics)
+
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
@@ -379,8 +440,10 @@ while True:
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
         if local_iter_num >= 5: # let the training loop settle a bit
-            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
-            running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
+            total_batch_scaled = (batch_size * gradient_accumulation_steps) * ddp_world_size 
+            raw_mfu = raw_model.estimate_mfu(total_batch_scaled, dt)
+            gpu_mfu = raw_mfu / ddp_world_size
+            running_mfu = gpu_mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*gpu_mfu
         
         if wandb_log and iter_num % wandb_interval == 0:
             all_router_probs = torch.cat(router_probs, dim=0)
@@ -390,8 +453,7 @@ while True:
             expert_counts = torch.bincount(expert_assignments_flat, minlength=model.module.config.n_exp)            
             dead_experts = (expert_counts == 0).sum().item()
            
-            
-            wandb.log({
+            train_metrics = {
                 "iter": iter_num,
                 "train/loss_instant": lossf, 
                 "train/aux_loss": running_aux,
@@ -404,7 +466,21 @@ while True:
                 "router/dead_experts": dead_experts,
                 "router/dropped_tokens": dropped_tokens,
                 "charts/grad_norm": total_norm
-            })
+            }
+
+            router_idx = 0
+            for name, param in raw_model.named_parameters():
+                # On cible les poids des routeurs (souvent nommés 'router.weight' ou 'gate.weight')
+                if ('router' in name.lower() or 'gate' in name.lower()) and 'weight' in name.lower():
+                    if param.grad is not None:
+                        layer_router_norm = param.grad.data.norm(2).item()
+                        
+                        # On l'enregistre avec son numéro de couche
+                        train_metrics[f"optimizer/router_layer_{router_idx}_grad_norm"] = layer_router_norm
+                        router_idx += 1
+
+            # Envoi groupé unique à W&B
+            wandb.log(train_metrics)
 
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
     
