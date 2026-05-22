@@ -275,7 +275,7 @@ def estimate_loss():
         losses = torch.zeros(eval_iters)
         aux_losses = torch.zeros(eval_iters)
         z_losses = torch.zeros(eval_iters)
-        router_probs = None
+        running_router_probs = None
 
         for k in range(eval_iters):
             X, Y = get_batch(split)
