@@ -374,18 +374,23 @@ while True:
                 "charts/mfu": running_mfu*100, # convert to percentage
             }
 
-            for layer_idx, probs in enumerate(router_probs):
-                probs_flat = probs.view(-1, probs.size(-1))
-                
-                entropy_per_token = -torch.sum(probs_flat * torch.log(probs_flat + 1e-10), dim=-1)
-                
-                expert_assignments = torch.argmax(probs_flat, dim=-1)
-                expert_counts = torch.bincount(expert_assignments, minlength=raw_model.config.n_exp)
-                dead_experts = (expert_counts == 0).sum().item()
-                
-                eval_metrics[f"router/layer_{layer_idx}/entropy"] = entropy_per_token.mean().item()
-                eval_metrics[f"router/layer_{layer_idx}/dead_experts"] = dead_experts
-                eval_metrics[f"router/layer_{layer_idx}/expert_counts"] = wandb.Histogram(expert_counts.cpu().numpy())
+            if 'router_probs' in locals() and iter_num > 0:
+
+                for layer_idx, probs in enumerate(router_probs):
+                    probs_flat = probs.view(-1, probs.size(-1))
+                    
+                    entropy_per_token = -torch.sum(probs_flat * torch.log(probs_flat + 1e-10), dim=-1)
+                    
+                    expert_assignments = torch.argmax(probs_flat, dim=-1)
+                    expert_counts = torch.bincount(expert_assignments, minlength=raw_model.config.n_exp)
+                    dead_experts = (expert_counts == 0).sum().item()
+                    
+                    eval_metrics[f"router/layer_{layer_idx}/entropy"] = entropy_per_token.mean().item()
+                    eval_metrics[f"router/layer_{layer_idx}/dead_experts"] = dead_experts
+                    eval_metrics[f"router/layer_{layer_idx}/expert_counts"] = wandb.Histogram(expert_counts.cpu().numpy())
+                else:
+                    eval_metrics["router/layer_0/entropy"] = 0.0
+                    eval_metrics["router/layer_0/dead_experts"] = 0
 
             wandb.log(eval_metrics)
 
