@@ -275,16 +275,26 @@ def estimate_loss():
         losses = torch.zeros(eval_iters)
         aux_losses = torch.zeros(eval_iters)
         z_losses = torch.zeros(eval_iters)
+        router_probs = None
+
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                _, loss, aux, z,_ , _, _, _ = model(X, Y)
+                _, loss, aux, z, _, _, r_probs, _ = model(X, Y)
             losses[k] = loss.item()
             aux_losses[k] = aux.item()
             z_losses[k] = z.item()
+            layer_probs = [p.detach().view(-1, p.size(-1)).mean(dim=0) for p in r_probs]
+
+            if running_router_probs is None:
+                running_router_probs = layer_probs
+            else:
+                for i in range(len(layer_probs)):
+                    running_router_probs[i] += layer_probs[i]
         out[split] = losses.mean()
         out[f"{split}_aux"] = aux.mean()
         out[f"{split}_z"] = z.mean()
+        out[f'{split}_router_probs'] = [p / eval_iters for p in running_router_probs]
     model.train()
     return out
 
