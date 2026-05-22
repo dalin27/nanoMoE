@@ -51,7 +51,7 @@ eval_iters = 200
 log_interval = 10
 
 # adamw optimizer
-optimizer_choice = 'adam'
+optimizer_choice = 'adam_vanilla'
 weight_decay = 0
 beta1 = 0.9
 beta2 = 0.99
