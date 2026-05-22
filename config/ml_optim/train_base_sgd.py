@@ -60,5 +60,5 @@ grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 2000 # how many steps to warm up for
-learning_rate = 6e-4 # max learning rate
-min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+learning_rate = 1e-2 # max learning rate
+min_lr = 1e-3 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
