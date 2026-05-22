@@ -199,8 +199,8 @@ class Router(nn.Module):
             exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [k, B * T]
 
             # mask probabilities to only include selected experts
-            router_probs = router_probs.view(num_tokens, self.n_exp)[None, :] # [1, B * T, n_exp]
-            exp_weights = exp_mask * router_probs # [k, B * T, n_exp]
+            select_probs = router_probs.view(num_tokens, self.n_exp)[None, :] # [1, B * T, n_exp]
+            exp_weights = exp_mask * select_probs # [k, B * T, n_exp]
 
 
 
