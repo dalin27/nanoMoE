@@ -31,7 +31,11 @@ torch._dynamo.config.suppress_errors = True
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group, broadcast
 
+from torch.nn import functional as F
+
 from model import GPTConfig, GPT
+
+from manager import MANAGER
 
 from dotenv import load_dotenv
 
@@ -158,15 +162,19 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
+shockset = 'codeparrot'
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
-def get_batch(split):
+data_dir_shock = os.path.join('data', shockset)
+def get_batch(split, is_shock_phase=False):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+    
+    current_dir = data_dir_shock if (is_shock_phase and split == 'train') else data_dir
     if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(os.path.join(current_dir, 'train.bin'), dtype=np.uint16, mode='r')
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(os.path.join(current_dir, 'val.bin'), dtype=np.uint16, mode='r')
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
@@ -325,6 +333,18 @@ local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 
+#collapse
+collapse_threshold = 2.0
+pre_shock_baseline_cv = 0.0 # You will calculate this dynamically before step 5000
+step_shock_start = 5000
+step_recovery_start = 5100
+
+# State trackers
+time_to_collapse = None
+time_to_recovery = None
+has_collapsed = False
+has_recovered = False
+
 stop_file_path = os.path.join(os.getcwd(), 'STOP')
 
 while True:
@@ -375,24 +395,37 @@ while True:
                 "charts/mfu": running_mfu*100, # convert to percentage
             }
 
-            if 'router_probs' in locals() and iter_num > 0:
+            # Single unified loop to extract all MoE statistics
+            if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
+                for layer_idx, block in enumerate(raw_model.transformer.h):
+                    
+                    # 1. Check if this layer has the MoE setup
+                    if hasattr(block, 'mlp') and hasattr(block.mlp, 'experts'):
+                        
+                        # --- SVD Statistics ---
+                        top_eigenvalues = block.mlp.experts.compute_svd_stats()
+                        mean_eigen = top_eigenvalues.mean().item()
+                        eigen_cv = top_eigenvalues.std(unbiased=False).item() / (mean_eigen + 1e-10)
+                        
+                        eval_metrics[f"experts/layer_{layer_idx}/mean_top_eigen"] = mean_eigen
+                        eval_metrics[f"experts/layer_{layer_idx}/eigen_cv"] = eigen_cv
+                        eval_metrics[f"experts/layer_{layer_idx}/eigen_dist"] = wandb.Histogram(top_eigenvalues.cpu().numpy())
 
-                for layer_idx, probs in enumerate(router_probs):
-                    probs_flat = probs.view(-1, probs.size(-1))
-                    
-                    entropy_per_token = -torch.sum(probs_flat * torch.log(probs_flat + 1e-10), dim=-1)
-                    
-                    expert_assignments = torch.argmax(probs_flat, dim=-1)
-                    expert_counts = torch.bincount(expert_assignments, minlength=raw_model.config.n_exp)
-                    dead_experts = (expert_counts == 0).sum().item()
-                    
-                    eval_metrics[f"router/layer_{layer_idx}/entropy"] = entropy_per_token.mean().item()
-                    eval_metrics[f"router/layer_{layer_idx}/dead_experts"] = dead_experts
-                    eval_metrics[f"router/layer_{layer_idx}/expert_counts"] = wandb.Histogram(expert_counts.cpu().numpy())
-                else:
-                    eval_metrics["router/layer_0/entropy"] = 0.0
-                    eval_metrics["router/layer_0/dead_experts"] = 0
-
+                        # --- Router Statistics ---
+                        # We also check for the router and its latest probabilities
+                        if hasattr(block.mlp, 'router') and hasattr(block.mlp.router, 'latest_probs'):
+                            probs = block.mlp.router.latest_probs
+                            probs_flat = probs.view(-1, probs.size(-1))
+                            
+                            entropy_per_token = -torch.sum(probs_flat * torch.log(probs_flat + 1e-10), dim=-1)
+                            
+                            expert_assignments = torch.argmax(probs_flat, dim=-1)
+                            expert_counts = torch.bincount(expert_assignments, minlength=raw_model.config.n_exp)
+                            dead_experts = (expert_counts == 0).sum().item()
+                            
+                            eval_metrics[f"router/layer_{layer_idx}/entropy"] = entropy_per_token.mean().item()
+                            eval_metrics[f"router/layer_{layer_idx}/dead_experts"] = dead_experts
+                            eval_metrics[f"router/layer_{layer_idx}/expert_counts"] = wandb.Histogram(expert_counts.cpu().numpy())
             wandb.log(eval_metrics)
 
         if losses['val'] < best_val_loss or always_save_checkpoint:
@@ -436,9 +469,61 @@ while True:
             running_mean_r_l += mean_r_l.item() / gradient_accumulation_steps
             # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        
+        is_shock = step_shock_start <= iter_num < step_recovery_start
+        X, Y = get_batch('train',is_shock_phase=is_shock)
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
+
+
+    # TCCR tracking
+    if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
+        # Extract router probabilities from the LAST layer
+        last_layer_idx = len(raw_model.transformer.h) - 1
+        last_block = raw_model.transformer.h[last_layer_idx]
+        
+        if hasattr(last_block.mlp, 'router') and hasattr(last_block.mlp.router, 'latest_probs'):
+            # Calculate CV of expert distribution
+            probs = last_block.mlp.router.latest_probs
+            expert_assignments = torch.argmax(probs.view(-1, probs.size(-1)), dim=-1)
+            expert_counts = torch.bincount(expert_assignments, minlength=n_exp).float()
+            
+            # CV = standard deviation / mean
+            current_cv = (expert_counts.std(unbiased=False) / (expert_counts.mean() + 1e-10)).item()
+            
+            # 1. Capture Baseline (Right before step 5000)
+            if iter_num == step_shock_start - 1:
+                pre_shock_baseline_cv = current_cv
+                
+            # 2. Track Collapse
+            if step_shock_start <= iter_num < step_recovery_start:
+                if current_cv > collapse_threshold and not has_collapsed:
+                    time_to_collapse = iter_num - step_shock_start
+                    has_collapsed = True
+                    print(f"\n[SHOCK] Collapse Reached in {time_to_collapse} steps (CV: {current_cv:.2f})!")
+                    if wandb_log: wandb.log({"metrics/Time_to_Collapse": time_to_collapse}, step=iter_num)
+
+            # 3. Track Recovery
+            if iter_num >= step_recovery_start:
+                if has_collapsed and not has_recovered:
+                    if current_cv <= (pre_shock_baseline_cv * 1.10):
+                        time_to_recovery = iter_num - step_recovery_start
+                        has_recovered = True
+                        print(f"\n[RECOVERY] Recovered in {time_to_recovery} steps (CV: {current_cv:.2f})!")
+                        if wandb_log: wandb.log({"metrics/Time_to_Recovery": time_to_recovery}, step=iter_num)
+
+    actual_model = model.module if ddp else model
+    router_weights = [p for n, p in raw_model.named_parameters() if 'w_g.weight' in n]
+    
+    if len(router_weights) > 0:
+        target_router_weight = router_weights[0] # We track layer 0 for momentum drag
+        if target_router_weight.grad is not None:
+            grad_t = target_router_weight.grad.detach().clone()
+            weight_pre_step = target_router_weight.detach().clone()
+        else:
+            grad_t = None
+    else:
+        grad_t = None
 
     # clip the gradient
     total_norm = 0.0
@@ -468,20 +553,30 @@ while True:
             expert_assignments_flat = expert_assignments.flatten()
             expert_counts = torch.bincount(expert_assignments_flat, minlength=model.module.config.n_exp)            
             dead_experts = (expert_counts == 0).sum().item()
+
+            kl_div, router_cos_sim, grad_cos_sim, capacity_cv = MANAGER.get_and_reset_collapse_metrics()
            
             train_metrics = {
                 "iter": iter_num,
+
                 "train/loss_instant": lossf, 
                 "train/aux_loss": running_aux,
                 "train/z_loss": running_z, 
+
                 "charts/lr": lr,
                 "charts/mfu": running_mfu * 100,
+                "charts/grad_norm": total_norm,
+
                 "router/max_logit": running_max_r_l,
                 "router/avg_logit": running_mean_r_l,
                 "router/expert_counts": wandb.Histogram(expert_counts.cpu().numpy()),
                 "router/dead_experts": dead_experts,
                 "router/dropped_tokens": dropped_tokens,
-                "charts/grad_norm": total_norm
+
+                "router/kl_divergence_from_uni": kl_div,
+                "router/router_update_cos_sim": router_cos_sim,
+                "router/grad_update_cos_sim": grad_cos_sim,
+                "router/capacity_cv": capacity_cv
             }
 
             router_idx = 0
@@ -505,6 +600,15 @@ while True:
     scaler.update()
     # flush the gradients as soon as we can, no need for this memory anymore
     optimizer.zero_grad(set_to_none=True)
+
+    if grad_t is not None:
+        weight_post_step = target_router_weight.detach()
+        update_t = weight_post_step - weight_pre_step
+        
+        # Avoid zero-division on flat updates
+        if grad_t.norm() > 1e-7 and update_t.norm() > 1e-7:
+            cos_sim = F.cosine_similarity(grad_t.flatten(), update_t.flatten(), dim=0)
+            MANAGER.add_grad_update_cos_sim(cos_sim.item())
 
     iter_num += 1
     local_iter_num += 1

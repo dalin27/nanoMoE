@@ -162,7 +162,6 @@ def add_secret_env_flags(
             continue
         cmd.extend(["--environment", f"{key}=SECRET:{secret_name},{key}"])
 
-
 __all__ = [
     "DEFAULT_ENV_FILE",
     "build_runai_command",

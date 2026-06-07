@@ -12,14 +12,17 @@ class MOEManager:
         self.mean_router_logits = []
         self.router_probs = []
         self.dropped_tokens = []
+        self.capacity_cv = []
 
-
+    #reset
     
     def reset_aux_loss(self):
         self.aux_loss = []
     
     def reset_router_z_loss(self):
         self.router_z_loss = []
+
+    #add 
 
     def add_max_router_stats(self, logits):
         self.max_router_logits.append(logits.detach())
@@ -32,7 +35,33 @@ class MOEManager:
 
     def add_dropped_tokens(self, tokens):
         self.dropped_tokens.append(tokens.detach())
+    
+    def add_kl_divergence(self, val):
+        self.kl_divergence.append(val)
 
+    def add_router_update_cos_sim(self, val):
+        self.router_update_cos_sim.append(val)
+
+    def add_grad_update_cos_sim(self, val):
+        self.grad_update_cos_sim.append(val)
+    
+    def add_aux_loss(self, loss):
+        self.aux_loss.append(loss)
+    
+    def add_router_z_loss(self, loss):
+        self.router_z_loss.append(loss)
+
+    def add_capacity_cv(self, cv):
+        self.capacity_cv.append(cv)
+
+    ### get
+    
+    def aggregate_aux_loss(self):
+        return sum(self.aux_loss)
+
+    def aggregate_router_z_loss(self):
+        return sum(self.router_z_loss)
+    
     def get_router_stats(self):
         if not self.max_router_logits:
             return 0.0, 0.0
@@ -54,16 +83,25 @@ class MOEManager:
         self.dropped_tokens = []
         return overall_max, overall_mean, router_probs, dropped_tokens
     
-    def add_aux_loss(self, loss):
-        self.aux_loss.append(loss)
-    
-    def add_router_z_loss(self, loss):
-        self.router_z_loss.append(loss)
-    
-    def aggregate_aux_loss(self):
-        return sum(self.aux_loss)
+    def get_and_reset_collapse_metrics(self):
+        """
+        Retrieves the mean of the new collapse metrics across the macro-batch
+        and resets the buffers. Returns 0.0 if no data was logged.
+        """
+        def get_mean(lst):
+            return sum(lst) / len(lst) if lst else 0.0
+        
+        kl_div = get_mean(self.kl_divergence)
+        router_cos_sim = get_mean(self.router_update_cos_sim)
+        grad_cos_sim = get_mean(self.grad_update_cos_sim)
+        mean_cv = get_mean(self.capacity_cv)
 
-    def aggregate_router_z_loss(self):
-        return sum(self.router_z_loss)
+        # Reset buffers
+        self.kl_divergence = []
+        self.router_update_cos_sim = []
+        self.grad_update_cos_sim = []
+        self.capacity_cv = []
+
+        return kl_div, router_cos_sim, grad_cos_sim, mean_cv
 
 MANAGER = MOEManager()

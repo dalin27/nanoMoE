@@ -135,6 +135,44 @@ class Router(nn.Module):
 
             # Shazeer et al (https://arxiv.org/abs/1701.06538) does only topk
             # see page 4 eq (3)-(5), the code for this is commented out below
+            full_router_probs = F.softmax(logits, dim=-1)
+
+            if not self.training:
+                self.latest_probs = full_router_probs.detach() 
+                
+            MANAGER.add_router_probs(full_router_probs)
+
+            mean_router_probs = full_router_probs.mean(dim=(0, 1)) # [n_exp]
+            uniform_prob = 1.0 / self.n_exp
+            
+            # D_KL(P || U) = sum(P * log(P / U))
+            # Added epsilon 1e-10 to prevent log(0) during severe starvation
+            kl_div = torch.sum(
+                mean_router_probs * (torch.log(mean_router_probs + 1e-10) - math.log(uniform_prob))
+            )
+            MANAGER.add_kl_divergence(kl_div.item())
+
+            if self.training:
+                with torch.no_grad():
+                    current_weight = self.w_g.weight.detach()
+                    if self.prev_weight is not None:
+                        current_update = current_weight - self.prev_weight
+                        
+                        # Only track similarity if an update actually occurred 
+                        # (prevents logging zeros during gradient accumulation steps)
+                        if current_update.norm() > 1e-7:
+                            if self.prev_update is not None:
+                                cos_sim = F.cosine_similarity(
+                                    current_update.flatten(), 
+                                    self.prev_update.flatten(), 
+                                    dim=0
+                                )
+                                MANAGER.add_router_update_cos_sim(cos_sim.item())
+                            
+                            self.prev_update = current_update.clone()
+                    
+                    self.prev_weight = current_weight.clone()
+
             router_probs = torch.full_like(logits, float('-inf'))  # [B, T, n_exp]
             router_probs.scatter_(-1, top_k_indices, top_k_logits)
 
@@ -145,9 +183,6 @@ class Router(nn.Module):
             MANAGER.add_mean_router_stats(avg_router_logit)
 
             router_probs = F.softmax(router_probs, dim=-1)
-
-            MANAGER.add_router_probs(router_probs)
-
 
             # # normalize all router logits (not just top-k) via softmax      
             # router_probs = F.softmax(logits, dim=-1)
@@ -183,13 +218,16 @@ class Router(nn.Module):
             used_capacity = torch.sum(exp_mask, dim=(0, 1)) # [n_exp]
 
             total_routing_requests = num_tokens * self.top_k
-            # Nombre total de requêtes acceptées par les experts
             total_accepted = used_capacity.sum()
-            # Les tokens qui ont été jetés dans le vide !
             dropped_tokens = total_routing_requests - total_accepted
             
-            # Tu devras ajouter cette fonction à ta classe MOEManager
             MANAGER.add_dropped_tokens(dropped_tokens)
+
+            #CV 
+            used_capacity_float = used_capacity.float()
+            cv_load = used_capacity_float.std(unbiased=False) / (used_capacity_float.mean() + 1e-10)
+            MANAGER.add_capacity_cv(cv_load.item())
+
 
             # mask rank to only include tokens that are selected
             # perform a sum so each row only contains index of token
@@ -201,8 +239,6 @@ class Router(nn.Module):
             # mask probabilities to only include selected experts
             select_probs = router_probs.view(num_tokens, self.n_exp)[None, :] # [1, B * T, n_exp]
             exp_weights = exp_mask * select_probs # [k, B * T, n_exp]
-
-
 
             # convert rank into one-hot vectors over the available capacity
             # stores the position of each token within the capacity of the selected expert
@@ -340,6 +376,8 @@ class MOELayer(nn.Module):
         
         # resize output before return
         return output.view(B, T, n_embd)
+    
+
 
 class Block(nn.Module):
 
@@ -640,7 +678,8 @@ class GPT(nn.Module):
         optimizer_classes = {
         'adamw': torch.optim.AdamW,
         'adam_vanilla': torch.optim.Adam,
-        'sgd': torch.optim.SGD
+        'sgd': torch.optim.SGD, 
+        'adafactor': torch.optim.Adafactor
         }
 
         if optimizer_choice not in optimizer_classes:
@@ -678,6 +717,14 @@ class GPT(nn.Module):
                 lr=learning_rate, 
                 momentum=momentum,
                 nesterov=nesterov,
+                **extra_args
+            )
+
+        elif optimizer_choice == 'adafactor': 
+            optimizer = torch.optim.Adafactor(
+                optim_groups, 
+                lr=learning_rate, 
+                betas=betas, 
                 **extra_args
             )
         
