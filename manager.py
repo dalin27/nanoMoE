@@ -13,6 +13,8 @@ class MOEManager:
         self.router_probs = []
         self.dropped_tokens = []
         self.capacity_cv = []
+        self.kl_divergence = []
+        self.grad_update_cos_sim = []
 
     #reset
     
