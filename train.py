@@ -609,7 +609,7 @@ while True:
                             if hasattr(block.mlp, 'total_tracked_tokens') and block.mlp.total_tracked_tokens > 0:
                                 tokens = block.mlp.total_tracked_tokens.item()
                                 avg_entropy = block.mlp.running_entropy_sum.item() / tokens
-                                layer_dead_experts_tensor = (block.mlp.running_expert_counts == 0).sum()
+                                layer_dead_experts_tensor = (block.mlp.running_expert_counts == 0).sum().item()
                                 
                                 layer_metrics[f"router/layer_{layer_idx}/entropy"] = avg_entropy
                                 layer_metrics[f"router/layer_{layer_idx}/dead_experts"] = layer_dead_experts_tensor

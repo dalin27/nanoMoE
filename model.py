@@ -104,6 +104,7 @@ class Router(nn.Module):
         #gradient update tracking 
         self.prev_weight = None
         self.prev_update = None
+
     def forward(self, x):
         # optionally run the router in full precision to avoid instability during training
         # see discussion on pg. 9 here: https://arxiv.org/abs/2101.03961
@@ -389,7 +390,7 @@ class MOELayer(nn.Module):
             entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1)
             
             self.total_tracked_tokens += num_tokens
-            self.running_entropy_sum += entropy.sum()
+            self.running_entropy_sum += self.router.latest_kl_div.detach()
             self.running_expert_counts += batch_counts
 
         # ... rest of your forward path processing ...
