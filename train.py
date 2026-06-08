@@ -162,7 +162,7 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-shockset = 'codeparrot'
+shockset = 'tiny-codes'
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
 data_dir_shock = os.path.join('data', shockset)
@@ -336,8 +336,8 @@ running_mfu = -1.0
 #collapse
 collapse_threshold = 2.0
 pre_shock_baseline_cv = 0.0 # You will calculate this dynamically before step 5000
-step_shock_start = 100
-step_recovery_start = 200
+step_shock_start = 10
+step_recovery_start = 20
 
 # State trackers
 time_to_collapse = None
