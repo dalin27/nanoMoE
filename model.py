@@ -124,10 +124,12 @@ class Router(nn.Module):
                 logits += noise
 
             # router z loss, computed on logits (before softmax)
-            # this loss prevents router logits from becoming too large
             if self.use_router_z_loss:
                 z_loss = self.compute_router_z_loss(logits)
-                MANAGER.add_router_z_loss(z_loss)
+                # Saved to self WITHOUT detach() so the training loop can add it to the main loss
+                self.z_loss = z_loss 
+            else:
+                self.z_loss = 0.0
 
             # find top k experts for each token
             top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1) # [B, T, k]
@@ -135,23 +137,17 @@ class Router(nn.Module):
             # normalize expert probabilities via softmax
             full_router_probs = F.softmax(logits, dim=-1)
 
-            # FIX: Always extract latest_probs so tracking loops have access during training
+            # Extract metrics for the training loop's logging block
             self.latest_probs = full_router_probs.detach() 
-
-            MANAGER.add_router_probs(full_router_probs)
 
             mean_router_probs = full_router_probs.mean(dim=(0, 1)) # [n_exp]
             uniform_prob = 1.0 / self.n_exp
             
             # D_KL(P || U) = sum(P * log(P / U))
-            # Added epsilon 1e-10 to prevent log(0) during severe starvation
             kl_div = torch.sum(
                 mean_router_probs * (torch.log(mean_router_probs + 1e-10) - math.log(uniform_prob))
             )
-            MANAGER.add_kl_divergence(kl_div.item())
-
-            # --- WEIGHT ACCUMULATION FIX ---
-            # Inner weight delta logging removed from here. Handled explicitly after optimizer.step()
+            self.latest_kl_div = kl_div.detach()
 
             router_probs = torch.full_like(logits, float('-inf'))  # [B, T, n_exp]
             router_probs.scatter_(-1, top_k_indices, top_k_logits)
@@ -159,15 +155,18 @@ class Router(nn.Module):
             max_router_logit = top_k_logits.max().detach()
             avg_router_logit = top_k_logits.mean().detach()
 
-            MANAGER.add_max_router_stats(max_router_logit)
-            MANAGER.add_mean_router_stats(avg_router_logit)
+            self.latest_max_logit = max_router_logit
+            self.latest_avg_logit = avg_router_logit
 
             router_probs = F.softmax(router_probs, dim=-1)
 
             # compute auxiliary load balancing loss
             if self.use_aux_loss:
                 aux_loss = self.compute_aux_loss(router_probs, top_k_indices)
-                MANAGER.add_aux_loss(aux_loss)
+                # Saved to self WITHOUT detach() so the training loop can use it for gradients
+                self.aux_loss = aux_loss
+            else:
+                self.aux_loss = 0.0
 
             # compute expert capacity
             exp_capacity = self.get_capacity(num_tokens)
@@ -190,12 +189,13 @@ class Router(nn.Module):
             total_accepted = used_capacity.sum()
             dropped_tokens = total_routing_requests - total_accepted
             
-            MANAGER.add_dropped_tokens(dropped_tokens)
+            self.latest_dropped_tokens = dropped_tokens.detach()
 
             # CV 
             used_capacity_float = used_capacity.float()
             cv_load = used_capacity_float.std(unbiased=False) / (used_capacity_float.mean() + 1e-10)
-            MANAGER.add_capacity_cv(cv_load.item())
+            
+            self.latest_capacity_cv = cv_load.detach()
 
             # mask rank to only include tokens that are selected
             exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [k, B * T]
