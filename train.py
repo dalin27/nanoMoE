@@ -44,11 +44,12 @@ from dotenv import load_dotenv
 # I/O
 load_dotenv()
 out_dir = 'checkpoints'
-eval_interval = 2000
-log_interval = 1
+eval_interval = 500
+log_interval = 10
+old_log_int = log_interval
 wandb_interval = 50
-old_wandb_interval = wandb_interval
-eval_iters = 200
+old_wandb_int = wandb_interval
+eval_iters = 20
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
@@ -392,10 +393,13 @@ while True:
     is_in_shock_window = (step_shock_start - 50) <= iter_num <= (step_recovery_start + 200)
     
     if is_in_shock_window:
-        old_wandb_interval = wandb_interval
+        old_wandb_int = wandb_interval
+        old_log_int = log_interval
         wandb_interval = 5  
+        log_interval = 5
     else: 
-        wandb_interval = old_wandb_interval
+        wandb_interval = old_wandb_int
+        log_interval = old_log_int
 
     if iter_num % eval_interval == 0 and master_process:
 
@@ -525,11 +529,11 @@ while True:
             # CV = standard deviation / mean
             current_cv = (expert_counts.std(unbiased=False) / (expert_counts.mean() + 1e-10)).item()
             
-            # 1. Capture Baseline (Right before step 10)
+            # 1. Capture Baseline
             if iter_num == step_shock_start - 1:
                 pre_shock_baseline_cv = current_cv
                 
-            # 2. Track Collapse (Stays active after shock begins)
+            # 2. Track Collapse
             if iter_num >= step_shock_start:
                 if current_cv > collapse_threshold and not has_collapsed:
                     time_to_collapse = iter_num - step_shock_start
@@ -538,18 +542,18 @@ while True:
                         print(f"\n[SHOCK] Collapse Reached in {time_to_collapse} steps (CV: {current_cv:.2f})!")
                         if wandb_log: wandb.log({"metrics/Time_to_Collapse": time_to_collapse}, step=iter_num)
 
-            # 3. Track Recovery (Only checks after recovery phase begins AND a collapse was recorded)
+            # 3. Track Recovery (Use the shock start as the reference point)
             if iter_num >= step_recovery_start:
                 if has_collapsed and not has_recovered:
-                    # Added a safety check to ensure baseline cv was bound successfully
                     baseline = pre_shock_baseline_cv if 'pre_shock_baseline_cv' in locals() else 0.1
                     if current_cv <= (baseline * 1.10):
-                        time_to_recovery = iter_num - step_recovery_start
+                        # CORRECTED: This measures duration from the initial shock
+                        total_shock_duration = iter_num - step_shock_start
                         has_recovered = True
                         if master_process:
-                            print(f"\n[RECOVERY] Recovered in {time_to_recovery} steps!")
-                            if wandb_log: wandb.log({"metrics/Time_to_Recovery": time_to_recovery}, step=iter_num)
-
+                            print(f"\n[RECOVERY] Recovered in {total_shock_duration} steps!")
+                            if wandb_log: wandb.log({"metrics/Total_Shock_Duration": total_shock_duration}, step=iter_num)
+                            
     actual_model = model.module if ddp else model
     router_weights = [p for n, p in raw_model.named_parameters() if 'w_g.weight' in n]
     

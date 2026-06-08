@@ -40,14 +40,6 @@ tokens_expert = tokens_iter * top_k / n_exp
 limit_expert = tokens_expert * train_capacity
 if True: print(f'tokens, per iter: {tokens_iter}, per expert: {tokens_expert}; limit: {limit_expert}')
 
-max_iters = 7500
-lr_decay_iters = 7500
-
-# eval stuff
-eval_interval = 500
-eval_iters = 20
-log_interval = 10
-
 # adamw optimizer
 optimizer_choice = 'adamw'
 weight_decay = 1e-1
