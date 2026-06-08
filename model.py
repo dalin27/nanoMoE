@@ -398,6 +398,7 @@ class MLPExperts(nn.Module):
 class MOELayer(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.config = config
         self.router = Router(config) # (noisy) top k router
         self.experts = MLPExperts(config) # group of MLPs (experts)
 
@@ -430,7 +431,7 @@ class MOELayer(nn.Module):
                 
                 # 2. Track Expert Assignments (assuming exp_weight contains probabilities)
                 expert_assignments = torch.argmax(probs_flat, dim=-1)
-                batch_counts = torch.bincount(expert_assignments, minlength=self.experts.config.n_exp)
+                batch_counts = torch.bincount(expert_assignments, minlength=probs_flat.size(-1))
                 self.running_expert_counts += batch_counts
                 
                 self.total_tracked_tokens += num_tokens
