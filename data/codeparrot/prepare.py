@@ -15,11 +15,9 @@ if __name__ == '__main__':
     # We use a slice ['train[:5%]'] because you only need enough data for 100 steps.
     # 5% is still hundreds of thousands of documents, which is more than enough.
     dataset = load_dataset(
-    "codeparrot/github-code", 
-    languages=["C++"], 
-    split="train[:5%]", 
-    num_proc=num_proc_load_dataset,
-    trust_remote_code=True  # Add this parameter
+        "parquet", 
+        data_files="https://huggingface.co/datasets/codeparrot/github-code/resolve/refs%2Fconvert%2Fparquet/C%2B%2B-all/train-00000-of-00001.parquet",
+        split="train[:5%]"
     )
     # Create train and val splits
     split_dataset = dataset.train_test_split(test_size=0.005, seed=2357, shuffle=True)
