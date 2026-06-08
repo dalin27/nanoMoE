@@ -15,6 +15,7 @@ class MOEManager:
         self.capacity_cv = []
         self.kl_divergence = []
         self.grad_update_cos_sim = []
+        self.router_update_cos_sim = []
 
     #reset
     
