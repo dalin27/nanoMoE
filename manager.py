@@ -1,3 +1,4 @@
+import torch
 class MOEManager:
     """
     basic wrapper class for tracking, storing, and aggregating auxiliary
@@ -39,6 +40,7 @@ class MOEManager:
     def add_dropped_tokens(self, tokens):
         self.dropped_tokens.append(tokens.detach())
     
+    @torch._dynamo.disable
     def add_kl_divergence(self, val):
         self.kl_divergence.append(val)
 
