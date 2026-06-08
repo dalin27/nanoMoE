@@ -355,15 +355,9 @@ class MOELayer(nn.Module):
         # --- Tracking State ---
         # --- Tracking State ---
         self.tracking_enabled = False
-        self.register_buffer('running_expert_counts', torch.zeros(config.n_exp))
-        # Keep entropy tracking on the GPU tensor graph
-        self.register_buffer('running_entropy_sum', torch.zeros(1)) 
-        self.total_tracked_tokens = 0
-
-    def reset_tracking_stats(self):
-        self.running_expert_counts.zero_()
-        self.running_entropy_sum.zero_()  # Clear tensor natively
-        self.total_tracked_tokens = 0
+        self.register_buffer('running_expert_counts', torch.zeros(config.n_exp, dtype=torch.long))
+        self.register_buffer('running_entropy_sum', torch.zeros(1, dtype=torch.float32))
+        self.register_buffer('total_tracked_tokens', torch.zeros(1, dtype=torch.long))
 
     def forward(self, x: torch.Tensor):
         B, T, n_embd = x.size() 
@@ -385,7 +379,6 @@ class MOELayer(nn.Module):
                 # Sum across the token dimension (0) and capacity dimension (2)
                 # This returns exactly the number of active tokens assigned to each of the 8 experts
                 batch_counts = mask_3d.sum(dim=(0, 2))
-                self.running_expert_counts += batch_counts
                 
                 # 2. Track Entropy (True Distribution)
                 # Sum the weights across the capacity dimension to get (num_tokens, n_exp)
@@ -395,9 +388,10 @@ class MOELayer(nn.Module):
                 probs = raw_probs / (raw_probs.sum(dim=-1, keepdim=True) + 1e-10)
                 
                 entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1)
-                self.running_entropy_sum += entropy.sum()
                 
                 self.total_tracked_tokens += num_tokens
+                self.running_entropy_sum += entropy.sum()
+                self.running_expert_counts += batch_counts
 
         # ... rest of your forward path processing ...
         x = x.view(num_tokens, n_embd)

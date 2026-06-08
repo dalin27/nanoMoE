@@ -553,7 +553,7 @@ while True:
                         if master_process:
                             print(f"\n[RECOVERY] Recovered in {total_shock_duration} steps!")
                             if wandb_log: wandb.log({"metrics/Total_Shock_Duration": total_shock_duration}, step=iter_num)
-                            
+
     actual_model = model.module if ddp else model
     router_weights = [p for n, p in raw_model.named_parameters() if 'w_g.weight' in n]
     
@@ -617,14 +617,14 @@ while True:
                     if hasattr(block, 'mlp'):
                         # 1. Track Entropy and Dead Experts (Keeping math on GPU)
                         if hasattr(block.mlp, 'total_tracked_tokens') and block.mlp.total_tracked_tokens > 0:
-                            tokens = block.mlp.total_tracked_tokens
-                            avg_entropy_tensor = block.mlp.running_entropy_sum / tokens
+                            tokens = block.mlp.total_tracked_tokens.item()
+                            avg_entropy = block.mlp.running_entropy_sum.item() / tokens
                             layer_dead_experts_tensor = (block.mlp.running_expert_counts == 0).sum()
                             
                             layer_metrics[f"router/layer_{layer_idx}/entropy"] = avg_entropy_tensor
                             layer_metrics[f"router/layer_{layer_idx}/dead_experts"] = layer_dead_experts_tensor
                             
-                            block.mlp.total_tracked_tokens = 0
+                            block.mlp.total_tracked_tokens.zero_()
                             block.mlp.running_entropy_sum.zero_()
                             block.mlp.running_expert_counts.zero_()
 
