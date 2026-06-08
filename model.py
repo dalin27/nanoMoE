@@ -371,29 +371,21 @@ class MLPExperts(nn.Module):
     @torch.no_grad()
     def compute_top_singular_vectors(self):
         """
-        Computes the top right-singular vector for the input layer of each expert.
-        Returns: Tensor of shape (n_exp, hidden_dim)
+        Computes top right-singular vector for batched expert weights.
+        self.c_fc shape: (n_exp, n_embd, 4 * n_embd)
         """
-        top_vectors = []
+        # 1. Transpose the weights to (n_exp, 4 * n_embd, n_embd) 
+        # so we perform SVD on the transformation matrix (input_dim -> output_dim)
+        W = self.c_fc.transpose(1, 2).to(dtype=torch.float32)
         
-        for expert in self.experts: # Replace self.experts with your ModuleList name
-            # Target the first linear layer. Change 'fc1' to whatever your up-projection is named (e.g., 'w1', 'c_fc')
-            W = expert.fc1.weight.data 
-            
-            # SVD often fails on fp16/bf16. Cast to float32 for the math.
-            W_float = W.to(dtype=torch.float32)
-            
-            # W shape is (expert_hidden_dim, model_hidden_dim)
-            # full_matrices=False saves memory
-            U, S, Vh = torch.linalg.svd(W_float, full_matrices=False)
-            
-            # Vh contains the right-singular vectors as rows. 
-            # The top vector corresponding to the largest singular value is the first row.
-            top_vector = Vh[0, :] 
-            top_vectors.append(top_vector)
-            
-        # Stack into a single tensor of shape (n_exp, model_hidden_dim)
-        return torch.stack(top_vectors)
+        # 2. PyTorch linalg.svd processes batch dimension automatically
+        # W shape: (n_exp, output_dim, input_dim)
+        # U: (n_exp, out, out), S: (n_exp, min_dim), Vh: (n_exp, min_dim, input_dim)
+        _, _, Vh = torch.linalg.svd(W, full_matrices=False)
+        
+        # 3. Vh rows are the right-singular vectors. 
+        # The top vector for each expert is the first row of Vh.
+        return Vh[:, 0, :] # Returns (n_exp, n_embd)
 
 class MOELayer(nn.Module):
     def __init__(self, config):
@@ -448,7 +440,7 @@ class MOELayer(nn.Module):
                 self.running_entropy_sum += entropy.sum()
                 
                 self.total_tracked_tokens += num_tokens
-                
+
         # ... rest of your forward path processing ...
         x = x.view(num_tokens, n_embd)
         exp_batches = exp_mask.permute(1, 2, 0).type_as(x) @ x
