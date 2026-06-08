@@ -426,19 +426,29 @@ class MOELayer(nn.Module):
         # Assumes exp_weight or a derivative represents the assignment probabilities
         if self.tracking_enabled:
             with torch.no_grad():
-                # 1. Track Entropy (pure tensor operations)
-                probs_flat = exp_weight.view(num_tokens, -1)
-                entropy = -torch.sum(probs_flat * torch.log(probs_flat + 1e-10), dim=-1)
-                self.running_entropy_sum += entropy.sum() # NO MORE .item() here!
+                # Reconstruct the true dimensions: (num_tokens, n_exp, capacity)
+                # The -1 dynamically handles whatever capacity limit the router applies
+                mask_3d = exp_mask.view(num_tokens, self.config.n_exp, -1)
+                weights_3d = exp_weight.view(num_tokens, self.config.n_exp, -1)
                 
-                # 2. Track Expert Assignments (one-hot approach)
-                expert_assignments = torch.argmax(probs_flat, dim=-1)
-                one_hot = torch.nn.functional.one_hot(expert_assignments, num_classes=probs_flat.size(-1))
-                batch_counts = one_hot.sum(dim=0)
+                # 1. Track Expert Assignments (Exact Routing)
+                # Sum across the token dimension (0) and capacity dimension (2)
+                # This returns exactly the number of active tokens assigned to each of the 8 experts
+                batch_counts = mask_3d.sum(dim=(0, 2))
                 self.running_expert_counts += batch_counts
                 
+                # 2. Track Entropy (True Distribution)
+                # Sum the weights across the capacity dimension to get (num_tokens, n_exp)
+                raw_probs = weights_3d.sum(dim=-1) 
+                
+                # Normalize to ensure valid probabilities (critical for dropped/padded tokens)
+                probs = raw_probs / (raw_probs.sum(dim=-1, keepdim=True) + 1e-10)
+                
+                entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1)
+                self.running_entropy_sum += entropy.sum()
+                
                 self.total_tracked_tokens += num_tokens
-
+                
         # ... rest of your forward path processing ...
         x = x.view(num_tokens, n_embd)
         exp_batches = exp_mask.permute(1, 2, 0).type_as(x) @ x
