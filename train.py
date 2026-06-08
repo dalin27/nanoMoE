@@ -610,7 +610,7 @@ while True:
                             avg_entropy = block.mlp.running_entropy_sum.item() / tokens
                             layer_dead_experts_tensor = (block.mlp.running_expert_counts == 0).sum()
                             
-                            layer_metrics[f"router/layer_{layer_idx}/entropy"] = avg_entropy_tensor
+                            layer_metrics[f"router/layer_{layer_idx}/entropy"] = avg_entropy
                             layer_metrics[f"router/layer_{layer_idx}/dead_experts"] = layer_dead_experts_tensor
                             
                             block.mlp.total_tracked_tokens.zero_()
