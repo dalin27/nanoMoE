@@ -326,6 +326,13 @@ if wandb_log and master_process:
     import wandb
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
+class TrainingState:
+    def __init__(self):
+        self.prev_router_weight = None
+        self.prev_router_update = None
+
+training_state = TrainingState()
+
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
 t0 = time.time()
@@ -336,8 +343,8 @@ running_mfu = -1.0
 #collapse
 collapse_threshold = 2.0
 pre_shock_baseline_cv = 0.0 # You will calculate this dynamically before step 5000
-step_shock_start = 500
-step_recovery_start = 600
+step_shock_start = 100
+step_recovery_start = 150
 
 # State trackers
 time_to_collapse = None
@@ -379,6 +386,12 @@ while True:
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
+
+    #set shock log
+    is_in_shock_window = (step_shock_start - 50) <= iter_num <= (step_recovery_start + 200)
+    
+    if is_in_shock_window:
+        current_wandb_interval = 5  # Log to WandB almost continuously
 
     if iter_num % eval_interval == 0 and master_process:
 
@@ -443,17 +456,6 @@ while True:
                             eval_metrics[f"experts/layer_{layer_idx}/mean_pairwise_sim"] = pairwise_similarities.mean().item()
                             eval_metrics[f"experts/layer_{layer_idx}/max_pairwise_sim"] = pairwise_similarities.max().item()
 
-                        # --- Router Statistics ---
-                        # We also check for the router and its latest probabilities
-                        if hasattr(block.mlp, 'total_tracked_tokens') and block.mlp.total_tracked_tokens > 0:
-                            tokens = block.mlp.total_tracked_tokens
-                            avg_entropy = block.mlp.running_entropy_sum.item() / tokens
-                            expert_counts = block.mlp.running_expert_counts
-                            dead_experts = (expert_counts == 0).sum().item()
-                            
-                            eval_metrics[f"router/layer_{layer_idx}/entropy"] = avg_entropy
-                            eval_metrics[f"router/layer_{layer_idx}/dead_experts"] = dead_experts
-                            #eval_metrics[f"router/layer_{layer_idx}/expert_counts"] = wandb.Histogram(expert_counts.cpu().numpy())
             wandb.log(eval_metrics)
 
         if losses['val'] < best_val_loss or always_save_checkpoint:
@@ -598,28 +600,48 @@ while True:
                 "charts/mfu": running_mfu * 100,
                 "charts/grad_norm": total_norm,
 
-                "router/max_logit": running_max_r_l,
-                "router/avg_logit": running_mean_r_l,
-                "router/expert_counts": wandb.Histogram(expert_counts.cpu().numpy()),
-                "router/dead_experts": dead_experts,
-                "router/dropped_tokens": dropped_tokens,
+                "global_router/max_logit": running_max_r_l,
+                "global_router/avg_logit": running_mean_r_l,
+                "global_router/expert_counts": wandb.Histogram(expert_counts.cpu().numpy()),
+                "global_router/dead_experts": dead_experts,
+                "global_router/dropped_tokens": dropped_tokens,
 
-                "router/kl_divergence_from_uni": kl_div,
-                "router/router_update_cos_sim": router_cos_sim,
-                "router/grad_update_cos_sim": grad_cos_sim,
-                "router/capacity_cv": capacity_cv
+                "global_router/kl_divergence_from_uni": kl_div,
+                "global_router/router_update_cos_sim": router_cos_sim,
+                "global_router/grad_update_cos_sim": grad_cos_sim,
+                "global_router/capacity_cv": capacity_cv
             }
 
-            router_idx = 0
-            for name, param in raw_model.named_parameters():
-                # On cible les poids des routeurs (souvent nommés 'router.weight' ou 'gate.weight')
-                if ('router' in name.lower() or 'gate' in name.lower()) and 'weight' in name.lower():
-                    if param.grad is not None:
-                        layer_router_norm = param.grad.data.norm(2).item()
-                        
-                        # On l'enregistre avec son numéro de couche
-                        train_metrics[f"optimizer/router_layer_{router_idx}_grad_norm"] = layer_router_norm
-                        router_idx += 1
+            # --- Per-Layer Router Stats & Gradients ---
+            if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
+                for layer_idx, block in enumerate(raw_model.transformer.h):
+                    
+                    if hasattr(block, 'mlp'):
+                        # 1. Track Entropy and Dead Experts
+                        if hasattr(block.mlp, 'total_tracked_tokens') and block.mlp.total_tracked_tokens > 0:
+                            tokens = block.mlp.total_tracked_tokens
+                            avg_entropy = block.mlp.running_entropy_sum.item() / tokens
+                            expert_counts = block.mlp.running_expert_counts
+                            layer_dead_experts = (expert_counts == 0).sum().item()
+                            
+                            train_metrics[f"router/layer_{layer_idx}/entropy"] = avg_entropy
+                            train_metrics[f"router/layer_{layer_idx}/dead_experts"] = layer_dead_experts
+                            
+                            # CRITICAL: Reset running tallies
+                            block.mlp.total_tracked_tokens = 0
+                            block.mlp.running_entropy_sum.zero_()
+                            block.mlp.running_expert_counts.zero_()
+
+                        # 2. Track Router Gradient Norms (Fixes the tracking bug)
+                        if hasattr(block.mlp, 'router') and hasattr(block.mlp.router, 'w_g'):
+                            router_weight = block.mlp.router.w_g.weight
+                            # Check if gradients have been populated yet
+                            if router_weight.grad is not None:
+                                layer_router_norm = router_weight.grad.data.norm(2).item()
+                                train_metrics[f"router/layer_{layer_idx}/grad_norm"] = layer_router_norm
+
+            # Send group to WandB
+            wandb.log(train_metrics)
 
             # Envoi groupé unique à W&B
             wandb.log(train_metrics)
@@ -631,6 +653,33 @@ while True:
     scaler.update()
     # flush the gradients as soon as we can, no need for this memory anymore
     optimizer.zero_grad(set_to_none=True)
+
+
+    with torch.no_grad():
+        # Dig into the last layer's router weight matrix
+        router_layer = model.module.transformer.h[-1].mlp.router.w_g if hasattr(model, 'module') else model.transformer.h[-1].mlp.router.w_g
+        
+        current_weight = router_layer.weight.detach()
+        
+        # Check if we have a previous baseline to compare against
+        # Changed hasattr to direct None checks to prevent flattening crashes
+        if iter_num > 0 and getattr(training_state, 'prev_router_weight', None) is not None:
+            
+            # Calculate the true net update applied by the optimizer
+            actual_update = current_weight - training_state.prev_router_weight
+            
+            if getattr(training_state, 'prev_router_update', None) is not None:
+                cos_sim = F.cosine_similarity(
+                    actual_update.flatten(), 
+                    training_state.prev_router_update.flatten(), 
+                    dim=0
+                )
+                MANAGER.add_router_update_cos_sim(cos_sim.item())
+            
+            training_state.prev_router_update = actual_update.clone()
+        
+        # Cache the current weight for the next optimization step comparison
+        training_state.prev_router_weight = current_weight.clone()
 
     if grad_t is not None:
         weight_post_step = target_router_weight.detach()

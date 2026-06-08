@@ -104,7 +104,6 @@ class Router(nn.Module):
         #gradient update tracking 
         self.prev_weight = None
         self.prev_update = None
-    
     def forward(self, x):
         # optionally run the router in full precision to avoid instability during training
         # see discussion on pg. 9 here: https://arxiv.org/abs/2101.03961
@@ -133,16 +132,11 @@ class Router(nn.Module):
             # find top k experts for each token
             top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1) # [B, T, k]
 
-            # normalize expert probabilities
-            # Question: should we normalize over all experts or just top-k?
-            # we choose to normalize over top-k, other option is commented out below
-
-            # Shazeer et al (https://arxiv.org/abs/1701.06538) does only topk
-            # see page 4 eq (3)-(5), the code for this is commented out below
+            # normalize expert probabilities via softmax
             full_router_probs = F.softmax(logits, dim=-1)
 
-            if not self.training:
-                self.latest_probs = full_router_probs.detach() 
+            # FIX: Always extract latest_probs so tracking loops have access during training
+            self.latest_probs = full_router_probs.detach() 
 
             MANAGER.add_router_probs(full_router_probs)
 
@@ -156,26 +150,8 @@ class Router(nn.Module):
             )
             MANAGER.add_kl_divergence(kl_div.item())
 
-            if self.training:
-                with torch.no_grad():
-                    current_weight = self.w_g.weight.detach()
-                    if self.prev_weight is not None:
-                        current_update = current_weight - self.prev_weight
-                        
-                        # Only track similarity if an update actually occurred 
-                        # (prevents logging zeros during gradient accumulation steps)
-                        if current_update.norm() > 1e-7:
-                            if self.prev_update is not None:
-                                cos_sim = F.cosine_similarity(
-                                    current_update.flatten(), 
-                                    self.prev_update.flatten(), 
-                                    dim=0
-                                )
-                                MANAGER.add_router_update_cos_sim(cos_sim.item())
-                            
-                            self.prev_update = current_update.clone()
-                    
-                    self.prev_weight = current_weight.clone()
+            # --- WEIGHT ACCUMULATION FIX ---
+            # Inner weight delta logging removed from here. Handled explicitly after optimizer.step()
 
             router_probs = torch.full_like(logits, float('-inf'))  # [B, T, n_exp]
             router_probs.scatter_(-1, top_k_indices, top_k_logits)
@@ -188,12 +164,7 @@ class Router(nn.Module):
 
             router_probs = F.softmax(router_probs, dim=-1)
 
-            # # normalize all router logits (not just top-k) via softmax      
-            # router_probs = F.softmax(logits, dim=-1)
-
             # compute auxiliary load balancing loss
-            # this loss encourages equal probability assigned to each expert
-            # and equal load balancing of tokens assigned to each expert
             if self.use_aux_loss:
                 aux_loss = self.compute_aux_loss(router_probs, top_k_indices)
                 MANAGER.add_aux_loss(aux_loss)
@@ -202,22 +173,16 @@ class Router(nn.Module):
             exp_capacity = self.get_capacity(num_tokens)
 
             # make a multi-hot mask of chosen experts, size [B, T, n_exp]
-            # entries are 0 if expert not chosen and 1 if expert chosen
             exp_mask = F.one_hot(top_k_indices, num_classes=self.n_exp)  # [B, T, k, n_exp]
             exp_mask = exp_mask.view(num_tokens, self.top_k, self.n_exp)  # [B * T, k, n_exp]
             exp_mask = exp_mask.permute(1, 0, 2) # [k, B * T, n_exp]
 
-            # compute cumulative sum of each token over experts, this stores
-            # the index of each token within the batch of each expert
-            # NOTE: cumsum should count all top-1 first, top-2 second, etc.
-            # so that we prioritize top experts when dropping tokens (this is
-            # done by putting k dimension first for the reshape operation)
+            # compute cumulative sum of each token over experts
             exp_rank = exp_mask.reshape(self.top_k * num_tokens, self.n_exp)  # [k * B * T, n_exp]
             exp_rank = torch.cumsum(exp_rank, dim=0) - 1  # cumulative sum of expert selections [k * B * T, n_exp]
             exp_rank = exp_rank.reshape(self.top_k, num_tokens, self.n_exp)  # [k, B * T, n_exp]
 
             # mask out (set to zero) entries that go beyond expert capacity
-            # compute amount of used capacity by taking a sum over mask
             exp_mask *= torch.lt(exp_rank, exp_capacity) # [k, B * T, n_exp]
             used_capacity = torch.sum(exp_mask, dim=(0, 1)) # [n_exp]
 
@@ -227,17 +192,12 @@ class Router(nn.Module):
             
             MANAGER.add_dropped_tokens(dropped_tokens)
 
-            #CV 
+            # CV 
             used_capacity_float = used_capacity.float()
             cv_load = used_capacity_float.std(unbiased=False) / (used_capacity_float.mean() + 1e-10)
             MANAGER.add_capacity_cv(cv_load.item())
 
-
             # mask rank to only include tokens that are selected
-            # perform a sum so each row only contains index of token
-            # for the expert that is selected in that row
-            # result is a matrix that contains the position of each token
-            # in the batch of its corresponding expert
             exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [k, B * T]
 
             # mask probabilities to only include selected experts
@@ -245,14 +205,12 @@ class Router(nn.Module):
             exp_weights = exp_mask * select_probs # [k, B * T, n_exp]
 
             # convert rank into one-hot vectors over the available capacity
-            # stores the position of each token within the capacity of the selected expert
             exp_rank_sc = F.one_hot(exp_rank, num_classes=exp_capacity) # [k, B * T, exp_capacity]
 
-            # create a vector that stores, for each token, the weight of selected
-            # experts at token's position in the capacity of that expert
-            # size of tensor is [B * T, n_exp, exp_capacity]
+            # create a vector that stores weight parameters per token location placement
             cb_weight = torch.sum(exp_weights.unsqueeze(3) * exp_rank_sc.unsqueeze(2), dim=0)
-            sec_mask = cb_weight.bool() # binary mask of selected experts for each token
+            sec_mask = cb_weight.bool() 
+            
             return used_capacity, cb_weight, sec_mask
     
     def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
