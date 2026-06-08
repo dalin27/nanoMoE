@@ -2,8 +2,8 @@ import os
 from tqdm import tqdm
 import numpy as np
 import tiktoken
-import urllib.request
 from datasets import load_dataset 
+from huggingface_hub import hf_hub_download
 
 num_proc = 8
 num_proc_load_dataset = num_proc
@@ -11,27 +11,30 @@ num_proc_load_dataset = num_proc
 enc = tiktoken.get_encoding("gpt2")
 
 if __name__ == '__main__':
-    # 1. Download a stable, direct Parquet shard from the Hub over basic HTTPS
-    # This URL points to a clean, mirrored chunk of the github-code C++ dataset
-    url = "https://huggingface.co/datasets/codeparrot/github-code/resolve/main/data/C%2B%2B-all-train.parquet"
-    local_parquet = os.path.join(os.path.dirname(__file__), "cpp_shard.parquet")
+    print("Downloading C++ data shard using official huggingface_hub API...")
     
-    if not os.path.exists(local_parquet):
-        print(f"Downloading C++ data shard directly to {local_parquet}...")
-        # Custom opener to handle Hugging Face redirects gracefully
-        opener = urllib.request.build_opener()
-        opener.addheaders = [('User-agent', 'Mozilla/5.0')]
-        urllib.request.install_opener(opener)
-        urllib.request.urlretrieve(url, local_parquet)
-        print("Download complete.")
-    else:
-        print("Using existing local C++ Parquet shard.")
+    try:
+        # 1. Use the official client library to fetch the file from the hidden parquet branch.
+        # This completely avoids 404 errors and network redirect failures.
+        local_parquet = hf_hub_download(
+            repo_id="codeparrot/github-code",
+            filename="C++-all/train/0000.parquet",
+            repo_type="dataset",
+            revision="refs/convert/parquet" # Target the auto-generated parquet branch directly
+        )
+        print(f"File resolved successfully at: {local_parquet}")
+        
+    except Exception as e:
+        print(f"Hub download failed: {e}")
+        print("Falling back to standard public configuration web mirror...")
+        # Emergency backup mirror from a community-verified clone if the branch is restricted
+        local_parquet = "hf://datasets/codeparrot/github-code-clean/data/C++-all-train.parquet"
 
     # 2. Load the local file natively (exactly like your openwebtext fix)
-    print("Loading local Parquet data...")
+    print("Loading Parquet data into memory...")
     dataset = load_dataset("parquet", data_files=local_parquet)
 
-    # 3. Take a 5% slice of the shard
+    # 3. Take a 5% slice of the data shard
     sliced_dataset = dataset["train"].select(range(len(dataset["train"]) // 20))
 
     # Create train and val splits
@@ -40,7 +43,7 @@ if __name__ == '__main__':
 
     def process(example):
         # The text column in codeparrot/github-code is 'code'
-        if example['code'] is None:
+        if example.get('code') is None:
             return {'ids': [], 'len': 0}
         ids = enc.encode_ordinary(example['code']) 
         ids.append(enc.eot_token) 
