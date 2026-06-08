@@ -336,8 +336,8 @@ running_mfu = -1.0
 #collapse
 collapse_threshold = 2.0
 pre_shock_baseline_cv = 0.0 # You will calculate this dynamically before step 5000
-step_shock_start = 5000
-step_recovery_start = 5100
+step_shock_start = 100
+step_recovery_start = 200
 
 # State trackers
 time_to_collapse = None
