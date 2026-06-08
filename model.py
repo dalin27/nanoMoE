@@ -407,6 +407,11 @@ class MOELayer(nn.Module):
         self.running_entropy_sum = 0.0
         self.total_tracked_tokens = 0
 
+    def reset_tracking_stats(self):
+        self.running_expert_counts.zero_()
+        self.running_entropy_sum = 0.0
+        self.total_tracked_tokens = 0
+
     def forward(self, x: torch.Tensor):
         B, T, n_embd = x.size() 
         num_tokens = (B * T)
