@@ -605,20 +605,7 @@ while True:
                     for layer_idx, block in enumerate(raw_model.transformer.h):
                         
                         if hasattr(block, 'mlp'):
-                            # 1. Track Entropy and Dead Experts (Keeping math on GPU)
-                            if hasattr(block.mlp, 'total_tracked_tokens') and block.mlp.total_tracked_tokens > 0:
-                                tokens = block.mlp.total_tracked_tokens.item()
-                                avg_entropy = block.mlp.running_entropy_sum.item() / tokens
-                                layer_dead_experts_tensor = (block.mlp.running_expert_counts == 0).sum().item()
-                                
-                                layer_metrics[f"router/layer_{layer_idx}/entropy"] = avg_entropy
-                                layer_metrics[f"router/layer_{layer_idx}/dead_experts"] = layer_dead_experts_tensor
-                                
-                                block.mlp.total_tracked_tokens.zero_()
-                                block.mlp.running_entropy_sum.zero_()
-                                block.mlp.running_expert_counts.zero_()
 
-                            # 2. Track Router Gradient Norms & Harvest Metrics
                             if hasattr(block.mlp, 'router'):
                                 router = block.mlp.router
                                 
@@ -634,6 +621,25 @@ while True:
                                     layer_router_norm_tensor = router.w_g.weight.grad.data.norm(2)
                                     layer_metrics[f"router/layer_{layer_idx}/grad_norm"] = layer_router_norm_tensor
 
+                            # 1. Track Entropy and Dead Experts (Keeping math on GPU)
+                            if hasattr(block.mlp, 'total_tracked_tokens') and block.mlp.total_tracked_tokens > 0:
+                                tokens = block.mlp.total_tracked_tokens.item()
+                                avg_entropy = block.mlp.running_entropy_sum.item() / tokens
+                                expected_value = tokens_expert 
+                                threshold = expected_value * 0.05
+                                layer_und_experts_tensor = (block.mlp.running_expert_counts < threshold).sum().item()
+                                layer_dead_experts_tensor = (block.mlp.running_expert_counts == 0).sum().item()
+
+                                
+                                layer_metrics[f"router/layer_{layer_idx}/entropy"] = avg_entropy
+                                layer_metrics[f"router/layer_{layer_idx}/dead_experts"] = layer_dead_experts_tensor / model.module.config.n_exp
+                                layer_metrics[f"router/layer_{layer_idx}/less_0.05_experts"] = layer_und_experts_tensor / model.module.config.n_exp
+
+                                
+                                block.mlp.total_tracked_tokens.zero_()
+                                block.mlp.running_entropy_sum.zero_()
+                                block.mlp.running_expert_counts.zero_()
+                            
             # Calculate global averages from the harvested layers
             avg_kl_div = total_kl / layers_counted if layers_counted > 0 else 0.0
             avg_capacity_cv = total_cv / layers_counted if layers_counted > 0 else 0.0
