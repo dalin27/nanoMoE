@@ -2,8 +2,8 @@ import os
 from tqdm import tqdm
 import numpy as np
 import tiktoken
+import requests
 from datasets import load_dataset 
-from huggingface_hub import HfFileSystem
 
 num_proc = 8
 num_proc_load_dataset = num_proc
@@ -12,24 +12,27 @@ num_proc_load_dataset = num_proc
 enc = tiktoken.get_encoding("gpt2")
 
 if __name__ == '__main__':
-    print("Fetching C++ Parquet file paths from Hugging Face Hub...")
+    print("Querying Hugging Face API for C++ Parquet files...")
     
-    # 1. Initialize Hugging Face virtual file system to inspect the parquet branch
-    fs = HfFileSystem()
+    # 1. Ask the HF metadata server exactly where the C++ files are hosted
+    api_url = "https://datasets-server.huggingface.co/parquet?dataset=codeparrot/github-code"
+    response = requests.get(api_url).json()
     
-    # List all Parquet shards inside the C++ subset folder
-    # This automatically finds train-00000-of-01126.parquet, train-00001..., etc.
-    cpp_files = fs.glob("datasets/codeparrot/github-code@refs/convert/parquet/C++-all/*.parquet")
+    if "failed" in response and response["failed"]:
+        raise RuntimeError(f"HF API Error: {response}")
+        
+    # Filter the API response for only the 'C++-all' configuration files
+    data_files = [
+        f["url"] for f in response["parquet_files"] 
+        if f["config"] == "C++-all" and f["split"] == "train"
+    ]
     
-    # Convert paths back to standard hf:// URLs that load_dataset natively understands
-    data_files = [f"hf://{file}" for file in cpp_files]
-    
-    # Sort them to keep order consistent
-    data_files = sorted(data_files)
-    
-    print(f"Found {len(data_files)} Parquet chunks. Loading the 5% slice...")
+    if not data_files:
+        raise ValueError("Could not find any Parquet files matching configuration 'C++-all'.")
+        
+    print(f"Found {len(data_files)} Parquet chunks successfully. Loading 5% slice...")
 
-    # 2. Load natively using the 'parquet' engine, bypassing code execution
+    # 2. Safely read using the built-in parquet engine
     dataset = load_dataset("parquet", data_files=data_files, split="train[:5%]")
     print(f"Successfully loaded dataset slice with {len(dataset)} documents.")
 
