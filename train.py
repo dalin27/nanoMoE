@@ -403,18 +403,7 @@ while True:
 
     if iter_num % eval_interval == 0 and master_process:
 
-        #router tracking on 
-        for block in raw_model.transformer.h:
-            if hasattr(block, 'mlp') and hasattr(block.mlp, 'experts'):
-                block.mlp.tracking_enabled = True
-                block.mlp.reset_tracking_stats()
-
         losses = estimate_loss()
-
-        #track off
-        for block in raw_model.transformer.h:
-            if hasattr(block, 'mlp') and hasattr(block.mlp, 'experts'):
-                block.mlp.tracking_enabled = False
         
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
