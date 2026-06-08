@@ -48,7 +48,7 @@ if __name__ == '__main__':
         num_proc=num_proc,
     )
 
-    output_dir = os.path.join(os.path.dirname(__file__), 'data', 'cpp_dataset')
+    output_dir = os.path.join(os.path.dirname(__file__))
     os.makedirs(output_dir, exist_ok=True)
 
     for split, dset in tokenized.items():
