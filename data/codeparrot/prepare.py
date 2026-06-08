@@ -8,26 +8,23 @@ num_proc = 8
 enc = tiktoken.get_encoding("gpt2")
 
 if __name__ == '__main__':
-    print("Connecting to Hugging Face dataset stream...")
-    
-    # 1. Use the custom dataset script with trust_remote_code=True to bypass the security error
-    # 2. Pass the language argument explicitly as defined by the CodeParrot dataset script
-    # 3. Use streaming=True to fetch only what we need without downloading the massive full split
+    print("Bypassing dataset scripts and connecting directly to Parquet shards...")
+
+    # Force the pure parquet builder and point it directly to the hidden auto-converted branch
+    # This completely ignores the banned python execution files.
     stream = load_dataset(
-        "codeparrot/github-code-clean", 
-        trust_remote_code=True, 
-        languages=["C++"], 
+        "parquet",
+        data_files="hf://datasets/codeparrot/github-code@refs/convert/parquet/C++-all/train/*.parquet",
         split="train",
         streaming=True
     )
 
     # Fetch a specific number of C++ files directly from the stream.
-    # The full C++ dataset is ~7.3 million files. 5% would be ~369,000 files.
-    # We are pulling 10,000 here for testing purposes. Adjust as needed for your nanoMoE target.
+    # Adjust this number based on your exact nanoMoE scale requirements.
     print("Downloading dataset slice into memory...")
     sliced_data = list(stream.take(10000)) 
     
-    # Convert back to a standard Dataset object for normal map/tokenize processing
+    # Convert back to a standard Dataset object for mapping
     sliced_dataset = Dataset.from_list(sliced_data)
 
     print(f"Successfully loaded {len(sliced_dataset)} files.")
@@ -37,7 +34,6 @@ if __name__ == '__main__':
     split_dataset['val'] = split_dataset.pop('test') 
 
     def process(example):
-        # CodeParrot standardizes on 'code' for the source text
         code_content = example.get('code') or example.get('text')
         if code_content is None:
             return {'ids': [], 'len': 0}
@@ -48,7 +44,6 @@ if __name__ == '__main__':
 
     print("Tokenizing the splits...")
     
-    # Dynamically find columns to remove to avoid mapping crashes
     columns_to_remove = [col for col in split_dataset['train'].column_names if col not in ['ids', 'len']]
 
     tokenized = split_dataset.map(
