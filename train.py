@@ -336,8 +336,8 @@ running_mfu = -1.0
 #collapse
 collapse_threshold = 2.0
 pre_shock_baseline_cv = 0.0 # You will calculate this dynamically before step 5000
-step_shock_start = 10
-step_recovery_start = 20
+step_shock_start = 500
+step_recovery_start = 600
 
 # State trackers
 time_to_collapse = None
@@ -519,25 +519,27 @@ while True:
             # CV = standard deviation / mean
             current_cv = (expert_counts.std(unbiased=False) / (expert_counts.mean() + 1e-10)).item()
             
-            # 1. Capture Baseline (Right before step 5000)
+            # 1. Capture Baseline (Right before step 10)
             if iter_num == step_shock_start - 1:
                 pre_shock_baseline_cv = current_cv
                 
-            # 2. Track Collapse
-            if step_shock_start <= iter_num < step_recovery_start:
+            # 2. Track Collapse (Stays active after shock begins)
+            if iter_num >= step_shock_start:
                 if current_cv > collapse_threshold and not has_collapsed:
                     time_to_collapse = iter_num - step_shock_start
                     has_collapsed = True
                     print(f"\n[SHOCK] Collapse Reached in {time_to_collapse} steps (CV: {current_cv:.2f})!")
                     if wandb_log: wandb.log({"metrics/Time_to_Collapse": time_to_collapse}, step=iter_num)
 
-            # 3. Track Recovery
+            # 3. Track Recovery (Only checks after recovery phase begins AND a collapse was recorded)
             if iter_num >= step_recovery_start:
                 if has_collapsed and not has_recovered:
-                    if current_cv <= (pre_shock_baseline_cv * 1.10):
+                    # Added a safety check to ensure baseline cv was bound successfully
+                    baseline = pre_shock_baseline_cv if 'pre_shock_baseline_cv' in locals() else 0.1
+                    if current_cv <= (baseline * 1.10):
                         time_to_recovery = iter_num - step_recovery_start
                         has_recovered = True
-                        print(f"\n[RECOVERY] Recovered in {time_to_recovery} steps (CV: {current_cv:.2f})!")
+                        print(f"\n[RECOVERY] Recovered in {time_to_recovery} steps!")
                         if wandb_log: wandb.log({"metrics/Time_to_Recovery": time_to_recovery}, step=iter_num)
 
     actual_model = model.module if ddp else model
