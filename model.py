@@ -346,6 +346,26 @@ class MLPExperts(nn.Module):
             x += self.proj_bias
         x = self.dropout(x)
         return x
+    
+    @torch.no_grad()
+    def compute_svd_stats(self):
+        """
+        Computes the largest singular value for each expert matrix to monitor 
+        rank collapse and representation drift.
+        """
+        # torch.linalg.svdvals operates on the trailing two dimensions
+        # svd_fc shape: [n_exp, min(n_embd, 4 * n_embd)] -> [n_exp, n_embd]
+        svd_fc = torch.linalg.svdvals(self.c_fc.detach())
+        svd_proj = torch.linalg.svdvals(self.c_proj.detach())
+        
+        # Extract the largest singular value (index 0) for each expert
+        top_svd_fc = svd_fc[:, 0]      # Shape: [n_exp]
+        top_svd_proj = svd_proj[:, 0]  # Shape: [n_exp]
+        
+        # Combine them (e.g., average the top singular value across both matrices per expert)
+        top_singular_values = (top_svd_fc + top_svd_proj) / 2.0
+        
+        return top_singular_values
 
 class MOELayer(nn.Module):
     def __init__(self, config):
@@ -354,30 +374,25 @@ class MOELayer(nn.Module):
         self.experts = MLPExperts(config) # group of MLPs (experts)
 
     def forward(self, x: torch.Tensor):
-        B, T, n_embd = x.size() # track original shape of input
+        B, T, n_embd = x.size() 
         num_tokens = (B * T)
 
-        # pass each token through the router
+        # 1. Get routing outputs
         used_capacity, exp_weight, exp_mask = self.router(x)
-
-        # flatten out the input
-        x = x.view(num_tokens, n_embd)
-
-        # reshape tokens into batches for each expert
-        # [n_exp, exp_capacity, B * T] * [B * T, n_embd] -> [n_exp, exp_capacity, n_embd]
-        exp_batches = exp_mask.permute(1, 2, 0).type_as(x) @ x
-
-        # compute expert output
-        exp_out = self.experts(exp_batches) # [n_exp, exp_capacity, n_embd]
-
-        # aggregate expert outputs based on router weights
-        # eq (2) on page 4 of ST-MoE (https://arxiv.org/abs/2202.08906)
-        # similar equations are used for other MoE papers
-        exp_weight = exp_weight.view(num_tokens, -1) # [B * T, n_exp * exp_capacity]
-        exp_out = exp_out.view(-1, n_embd) # [n_exp * exp_capacity, n_embd] 
-        output = exp_weight @ exp_out # [B * T, n_embd]
         
-        # resize output before return
+        # 2. Cache weights for your stats loop tracking
+        # Assumes exp_weight or a derivative represents the assignment probabilities
+        self.router.latest_probs = exp_weight.detach() 
+
+        # ... rest of your forward path processing ...
+        x = x.view(num_tokens, n_embd)
+        exp_batches = exp_mask.permute(1, 2, 0).type_as(x) @ x
+        exp_out = self.experts(exp_batches) 
+        
+        exp_weight_flat = exp_weight.view(num_tokens, -1) 
+        exp_out_flat = exp_out.view(-1, n_embd) 
+        output = exp_weight_flat @ exp_out_flat 
+        
         return output.view(B, T, n_embd)
     
 
