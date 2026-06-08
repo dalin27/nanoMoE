@@ -14,8 +14,13 @@ if __name__ == '__main__':
     # Load only the C++ subset of the codeparrot dataset.
     # We use a slice ['train[:5%]'] because you only need enough data for 100 steps.
     # 5% is still hundreds of thousands of documents, which is more than enough.
-    dataset = load_dataset("codeparrot/github-code", languages=["C++"], split="train[:5%]", num_proc=num_proc_load_dataset)
-
+    dataset = load_dataset(
+    "codeparrot/github-code", 
+    languages=["C++"], 
+    split="train[:5%]", 
+    num_proc=num_proc_load_dataset,
+    trust_remote_code=True  # Add this parameter
+    )
     # Create train and val splits
     split_dataset = dataset.train_test_split(test_size=0.005, seed=2357, shuffle=True)
     split_dataset['val'] = split_dataset.pop('test')
