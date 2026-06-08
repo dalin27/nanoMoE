@@ -618,7 +618,7 @@ while True:
 
                                 # Get gradients safely (Keeping norm on GPU)
                                 if hasattr(router, 'w_g') and router.w_g.weight.grad is not None:
-                                    layer_router_norm_tensor = router.w_g.weight.grad.data.norm(2)
+                                    layer_router_norm_tensor = router.w_g.weight.grad.data.norm(2).item()
                                     layer_metrics[f"router/layer_{layer_idx}/grad_norm"] = layer_router_norm_tensor
 
                             # 1. Track Entropy and Dead Experts (Keeping math on GPU)
