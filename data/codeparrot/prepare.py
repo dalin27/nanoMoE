@@ -11,14 +11,21 @@ num_proc_load_dataset = num_proc
 enc = tiktoken.get_encoding("gpt2")
 
 if __name__ == '__main__':
-    # Load only the C++ subset of the codeparrot dataset.
-    # We use a slice ['train[:5%]'] because you only need enough data for 100 steps.
-    # 5% is still hundreds of thousands of documents, which is more than enough.
-    dataset = load_dataset(
-        "parquet", 
-        data_files="https://huggingface.co/datasets/codeparrot/github-code/resolve/refs%2Fconvert%2Fparquet/C%2B%2B-all/train-00000-of-00001.parquet",
-        split="train[:5%]"
-    )
+    print("Loading dataset in streaming mode...")
+    # 1. Use streaming=True to completely bypass the deprecated dataset script block
+    remote_dataset = load_dataset("codeparrot/github-code", languages=["C++"], split="train", streaming=True)
+
+    # 2. Pull the exact number of samples needed for your 5% slice safely
+    # The total C++ files is ~7.3 Million. 5% is roughly 369,000 files.
+    num_samples = 369000 
+    print(f"Taking {num_samples} samples from the C++ stream...")
+    
+    # Take the slice and convert the stream into a local standard Dataset object
+    dataset = remote_dataset.take(num_samples)
+    dataset = list(dataset)
+    from datasets import Dataset
+    dataset = Dataset.from_list(dataset)
+
     # Create train and val splits
     split_dataset = dataset.train_test_split(test_size=0.005, seed=2357, shuffle=True)
     split_dataset['val'] = split_dataset.pop('test')
@@ -37,23 +44,3 @@ if __name__ == '__main__':
         desc="tokenizing the splits",
         num_proc=num_proc,
     )
-
-    # Ensure the output directory matches the dynamic router logic
-    output_dir = os.path.join(os.path.dirname(__file__), 'data', 'cpp_dataset')
-    os.makedirs(output_dir, exist_ok=True)
-
-    for split, dset in tokenized.items():
-        arr_len = np.sum(dset['len'], dtype=np.uint64)
-        filename = os.path.join(output_dir, f'{split}.bin')
-        dtype = np.uint16 
-        arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
-        total_batches = 1024
-
-        idx = 0
-        for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
-            batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format('numpy')
-            arr_batch = np.concatenate(batch['ids'])
-            arr[idx : idx + len(arr_batch)] = arr_batch
-            idx += len(arr_batch)
-        arr.flush()
-        print(f"Saved {filename} with {arr_len} tokens.")
