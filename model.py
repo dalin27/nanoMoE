@@ -100,6 +100,9 @@ class Router(nn.Module):
         # no bias is used, see page 4 eq (4) in (https://arxiv.org/abs/1701.06538)
         self.w_g = nn.Linear(config.n_embd, config.n_exp, bias=False)
         self.w_noise = nn.Linear(config.n_embd, config.n_exp, bias=False) if self.use_noisy_top_k else None
+
+        #gradient update tracking 
+        self.prev_weight = None
     
     def forward(self, x):
         # optionally run the router in full precision to avoid instability during training
@@ -139,7 +142,7 @@ class Router(nn.Module):
 
             if not self.training:
                 self.latest_probs = full_router_probs.detach() 
-                
+
             MANAGER.add_router_probs(full_router_probs)
 
             mean_router_probs = full_router_probs.mean(dim=(0, 1)) # [n_exp]
