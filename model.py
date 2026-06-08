@@ -103,6 +103,7 @@ class Router(nn.Module):
 
         #gradient update tracking 
         self.prev_weight = None
+        self.prev_update = None
     
     def forward(self, x):
         # optionally run the router in full precision to avoid instability during training
