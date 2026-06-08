@@ -56,10 +56,15 @@ if __name__ == '__main__':
         filename = os.path.join(output_dir, f'{split}.bin')
         dtype = np.uint16 
         arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
-        total_batches = 1024
+        
+        # FIX: Dynamically scale batches so small splits (like val) don't crash
+        total_batches = min(1024, len(dset))
+        if total_batches == 0:
+            print(f"Skipping empty split: {split}")
+            continue
 
         idx = 0
-        for batch_idx in tqdm(range(total_batches), desc=f"writing {filename}"):
+        for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
             batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format('numpy')
             if len(batch['ids']) > 0:
                 arr_batch = np.concatenate(batch['ids'])
