@@ -367,12 +367,45 @@ class MLPExperts(nn.Module):
         top_singular_values = (top_svd_fc + top_svd_proj) / 2.0
         
         return top_singular_values
+    
+    @torch.no_grad()
+    def compute_top_singular_vectors(self):
+        """
+        Computes the top right-singular vector for the input layer of each expert.
+        Returns: Tensor of shape (n_exp, hidden_dim)
+        """
+        top_vectors = []
+        
+        for expert in self.experts: # Replace self.experts with your ModuleList name
+            # Target the first linear layer. Change 'fc1' to whatever your up-projection is named (e.g., 'w1', 'c_fc')
+            W = expert.fc1.weight.data 
+            
+            # SVD often fails on fp16/bf16. Cast to float32 for the math.
+            W_float = W.to(dtype=torch.float32)
+            
+            # W shape is (expert_hidden_dim, model_hidden_dim)
+            # full_matrices=False saves memory
+            U, S, Vh = torch.linalg.svd(W_float, full_matrices=False)
+            
+            # Vh contains the right-singular vectors as rows. 
+            # The top vector corresponding to the largest singular value is the first row.
+            top_vector = Vh[0, :] 
+            top_vectors.append(top_vector)
+            
+        # Stack into a single tensor of shape (n_exp, model_hidden_dim)
+        return torch.stack(top_vectors)
 
 class MOELayer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.router = Router(config) # (noisy) top k router
         self.experts = MLPExperts(config) # group of MLPs (experts)
+
+        # --- Tracking State ---
+        self.tracking_enabled = False
+        self.register_buffer('running_expert_counts', torch.zeros(config.n_exp))
+        self.running_entropy_sum = 0.0
+        self.total_tracked_tokens = 0
 
     def forward(self, x: torch.Tensor):
         B, T, n_embd = x.size() 
@@ -383,7 +416,19 @@ class MOELayer(nn.Module):
         
         # 2. Cache weights for your stats loop tracking
         # Assumes exp_weight or a derivative represents the assignment probabilities
-        self.router.latest_probs = exp_weight.detach() 
+        if self.tracking_enabled:
+            with torch.no_grad():
+                # 1. Track Entropy
+                probs_flat = exp_weight.view(num_tokens, -1)
+                entropy = -torch.sum(probs_flat * torch.log(probs_flat + 1e-10), dim=-1)
+                self.running_entropy_sum += entropy.sum().item()
+                
+                # 2. Track Expert Assignments (assuming exp_weight contains probabilities)
+                expert_assignments = torch.argmax(probs_flat, dim=-1)
+                batch_counts = torch.bincount(expert_assignments, minlength=self.experts.config.n_exp)
+                self.running_expert_counts += batch_counts
+                
+                self.total_tracked_tokens += num_tokens
 
         # ... rest of your forward path processing ...
         x = x.view(num_tokens, n_embd)
@@ -695,10 +740,12 @@ class GPT(nn.Module):
         print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
 
         optimizer_classes = {
-        'adamw': torch.optim.AdamW,
-        'adam_vanilla': torch.optim.Adam,
-        'sgd': torch.optim.SGD, 
-        'adafactor': torch.optim.Adafactor
+            'adamw': torch.optim.AdamW,
+            'adam_vanilla': torch.optim.Adam,
+            'sgd': torch.optim.SGD, 
+            'adafactor': torch.optim.Adafactor, # Note: Ensure this is correctly imported/patched 
+            'adagrad': torch.optim.Adagrad,
+            'sparse_adam': torch.optim.SparseAdam   # PyTorch native LazyAdam implementation
         }
 
         if optimizer_choice not in optimizer_classes:
@@ -713,9 +760,8 @@ class GPT(nn.Module):
         print(f"using fused {optimizer_choice}: {use_fused}")
 
         # In your training loop initialization:
-
         if optimizer_choice == 'adamw':
-            optimizer = torch.optim.AdamW(
+            optimizer = optim_class(
                 optim_groups, 
                 lr=learning_rate, 
                 betas=betas, 
@@ -723,7 +769,7 @@ class GPT(nn.Module):
             )
 
         elif optimizer_choice == 'adam_vanilla':
-            optimizer = torch.optim.Adam(
+            optimizer = optim_class(
                 optim_groups, 
                 lr=learning_rate, 
                 betas=betas, 
@@ -731,7 +777,7 @@ class GPT(nn.Module):
             )
 
         elif optimizer_choice == 'sgd':
-            optimizer = torch.optim.SGD(
+            optimizer = optim_class(
                 optim_groups, 
                 lr=learning_rate, 
                 momentum=momentum,
@@ -740,10 +786,25 @@ class GPT(nn.Module):
             )
 
         elif optimizer_choice == 'adafactor': 
-            optimizer = torch.optim.Adafactor(
+            optimizer = optim_class(
                 optim_groups, 
                 lr=learning_rate, 
                 betas=betas, 
+                **extra_args
+            )
+            
+        elif optimizer_choice == 'adagrad':
+            optimizer = optim_class(
+                optim_groups,
+                lr=learning_rate,
+                **extra_args
+            )
+            
+        elif optimizer_choice == 'lazy_adam':
+            optimizer = optim_class(
+                optim_groups,
+                lr=learning_rate,
+                betas=betas,
                 **extra_args
             )
         

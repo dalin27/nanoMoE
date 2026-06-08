@@ -2,12 +2,12 @@ import time
 
 # config for training GPT-2 baseline model (moe) on two GPUs
 # launch as the following (e.g. in a screen session):
-# $ torchrun --standalone --nproc_per_node=2 train.py config/train_moe_sgd.py
+# $ torchrun --standalone --nproc_per_node=2 train.py config/train_moe_sparse_adam.py
 
 wandb_log = True
 init_from = 'scratch'
 wandb_project = 'ml-optim'
-wandb_run_name ='gpt2-moe-sgd_' + time.strftime('%Y-%m-%d %H:%M:%S')
+wandb_run_name ='gpt2-moe-sparse_adam_' + time.strftime('%Y-%m-%d %H:%M:%S')
 
 # model/moe settings
 n_exp = 8
@@ -19,7 +19,7 @@ router_z_loss_weight = 0.0
 use_noisy_top_k = False
 train_capacity = 8
 eval_capacity = 2.0
-stride = 2
+stride = 1
 use_switch_tfm_init = True
 switch_tfm_init_scale = 1.0  
 router_use_full_prec = True
@@ -33,7 +33,7 @@ n_embd = 384
 batch_size = 32
 block_size = 1024
 gradient_accumulation_steps = 16
-gpu_count = 1
+gpu_count = 2
 
 tokens_iter = batch_size * block_size * gradient_accumulation_steps * gpu_count
 tokens_expert = tokens_iter * top_k / n_exp
@@ -48,16 +48,16 @@ eval_interval = 500
 eval_iters = 20
 log_interval = 10
 
-# sgd optimizer
-optimizer_choice = 'sgd'
-weight_decay = 0.0
-beta1 = 0.0
-beta2 = 0.0
-momentum = 0.9 # Standard momentum for SGD
+# sparse_adam optimizer
+optimizer_choice = 'sparse_adam'
+weight_decay = 0.0 # Kept at 0.0 to match Adagrad baseline
+beta1 = 0.9        # Standard Adam beta1
+beta2 = 0.999      # Standard Adam beta2
+momentum = 0.0
 grad_clip = 5.0 # high ghost clip
 
 # learning rate decay settings
 decay_lr = True 
 warmup_iters = 500 
-learning_rate = 6e-4 # SGD often requires learning rate tuning distinct from Adam
+learning_rate = 6e-4 
 min_lr = 6e-5

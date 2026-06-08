@@ -19,7 +19,6 @@ router_z_loss_weight = 0.0
 use_noisy_top_k = False
 train_capacity = 8.0
 eval_capacity = 2.0
-stride = 2
 use_switch_tfm_init = True
 switch_tfm_init_scale = 1.0  
 router_use_full_prec = True
@@ -28,6 +27,7 @@ router_use_full_prec = True
 n_layer = 2
 n_head = 6
 n_embd = 384
+stride = 1
 
 # total batch size
 batch_size = 32
@@ -54,7 +54,7 @@ weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 momentum = 0
-grad_clip = 0.0 # no clipping
+grad_clip = 5.0 # high ghost clip
 
 # learning rate decay settings
 decay_lr = True 

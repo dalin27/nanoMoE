@@ -7,7 +7,7 @@ import time
 wandb_log = True
 init_from = 'scratch'
 wandb_project = 'ml-optim'
-wandb_run_name ='gpt2-moe-adagrad ' + time.strftime('%Y-%m-%d %H:%M:%S')
+wandb_run_name ='gpt2-moe-adagrad_' + time.strftime('%Y-%m-%d %H:%M:%S')
 
 # model/moe settings
 n_exp = 8
@@ -19,7 +19,7 @@ router_z_loss_weight = 0.0
 use_noisy_top_k = False
 train_capacity = 8
 eval_capacity = 2.0
-stride = 2
+stride = 1
 use_switch_tfm_init = True
 switch_tfm_init_scale = 1.0  
 router_use_full_prec = True
@@ -54,7 +54,7 @@ weight_decay = 0.0
 beta1 = 0.0
 beta2 = 0.0
 momentum = 0.0
-grad_clip = 0.0 # no clipping
+grad_clip = 1.0 # high ghost clip
 
 # learning rate decay settings
 decay_lr = True 

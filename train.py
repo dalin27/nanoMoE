@@ -380,9 +380,21 @@ while True:
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-    # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
+
+        #router tracking on 
+        for block in raw_model.transformer.h:
+            if hasattr(block, 'mlp') and hasattr(block.mlp, 'experts'):
+                block.mlp.tracking_enabled = True
+                block.mlp.reset_tracking_stats()
+
         losses = estimate_loss()
+
+        #track off
+        for block in raw_model.transformer.h:
+            if hasattr(block, 'mlp') and hasattr(block.mlp, 'experts'):
+                block.mlp.tracking_enabled = False
+        
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
             eval_metrics = {
@@ -402,7 +414,7 @@ while True:
                     # 1. Check if this layer has the MoE setup
                     if hasattr(block, 'mlp') and hasattr(block.mlp, 'experts'):
                         
-                        # --- SVD Statistics ---
+                        # --- SVD Statistics (Magnitude Imbalance) ---
                         top_eigenvalues = block.mlp.experts.compute_svd_stats()
                         mean_eigen = top_eigenvalues.mean().item()
                         eigen_cv = top_eigenvalues.std(unbiased=False).item() / (mean_eigen + 1e-10)
@@ -411,19 +423,35 @@ while True:
                         eval_metrics[f"experts/layer_{layer_idx}/eigen_cv"] = eigen_cv
                         eval_metrics[f"experts/layer_{layer_idx}/eigen_dist"] = wandb.Histogram(top_eigenvalues.cpu().numpy())
 
+                        # --- SVD Statistics (Representational Divergence) ---
+                        if hasattr(block.mlp.experts, 'compute_top_singular_vectors'):
+                            # Expected shape: (n_exp, hidden_dim)
+                            top_vectors = block.mlp.experts.compute_top_singular_vectors() 
+                            
+                            # Normalize vectors to unit length for cosine similarity
+                            vectors_normalized = torch.nn.functional.normalize(top_vectors, p=2, dim=1)
+                            
+                            # Compute pairwise cosine similarity matrix
+                            similarity_matrix = torch.matmul(vectors_normalized, vectors_normalized.t())
+                            
+                            # Extract off-diagonal elements (ignore self-similarity)
+                            n_exp = similarity_matrix.size(0)
+                            mask = ~torch.eye(n_exp, dtype=torch.bool, device=similarity_matrix.device)
+                            pairwise_similarities = similarity_matrix[mask]
+                            
+                            # Log metrics
+                            eval_metrics[f"experts/layer_{layer_idx}/mean_pairwise_sim"] = pairwise_similarities.mean().item()
+                            eval_metrics[f"experts/layer_{layer_idx}/max_pairwise_sim"] = pairwise_similarities.max().item()
+
                         # --- Router Statistics ---
                         # We also check for the router and its latest probabilities
-                        if hasattr(block.mlp, 'router') and hasattr(block.mlp.router, 'latest_probs'):
-                            probs = block.mlp.router.latest_probs
-                            probs_flat = probs.view(-1, probs.size(-1))
-                            
-                            entropy_per_token = -torch.sum(probs_flat * torch.log(probs_flat + 1e-10), dim=-1)
-                            
-                            expert_assignments = torch.argmax(probs_flat, dim=-1)
-                            expert_counts = torch.bincount(expert_assignments, minlength=raw_model.config.n_exp)
+                        if hasattr(block.mlp, 'total_tracked_tokens') and block.mlp.total_tracked_tokens > 0:
+                            tokens = block.mlp.total_tracked_tokens
+                            avg_entropy = block.mlp.running_entropy_sum / tokens
+                            expert_counts = block.mlp.running_expert_counts
                             dead_experts = (expert_counts == 0).sum().item()
                             
-                            eval_metrics[f"router/layer_{layer_idx}/entropy"] = entropy_per_token.mean().item()
+                            eval_metrics[f"router/layer_{layer_idx}/entropy"] = avg_entropy
                             eval_metrics[f"router/layer_{layer_idx}/dead_experts"] = dead_experts
                             eval_metrics[f"router/layer_{layer_idx}/expert_counts"] = wandb.Histogram(expert_counts.cpu().numpy())
             wandb.log(eval_metrics)

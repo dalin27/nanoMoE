@@ -19,7 +19,7 @@ router_z_loss_weight = 0.0
 use_noisy_top_k = False
 train_capacity = 8
 eval_capacity = 2.0
-stride = 2
+stride = 1
 use_switch_tfm_init = True
 switch_tfm_init_scale = 1.0  
 router_use_full_prec = True
@@ -54,7 +54,7 @@ weight_decay = 0.0 # Standard Adam decoupled weight decay is 0
 beta1 = 0.9
 beta2 = 0.95
 momentum = 0
-grad_clip = 0.0 # no clipping
+grad_clip = 5.0 # high ghost clip
 
 # learning rate decay settings
 decay_lr = True 
