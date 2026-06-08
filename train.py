@@ -421,7 +421,7 @@ while True:
                         
                         eval_metrics[f"experts/layer_{layer_idx}/mean_top_eigen"] = mean_eigen
                         eval_metrics[f"experts/layer_{layer_idx}/eigen_cv"] = eigen_cv
-                        eval_metrics[f"experts/layer_{layer_idx}/eigen_dist"] = wandb.Histogram(top_eigenvalues.cpu().numpy())
+                        #eval_metrics[f"experts/layer_{layer_idx}/eigen_dist"] = wandb.Histogram(top_eigenvalues.cpu().numpy())
 
                         # --- SVD Statistics (Representational Divergence) ---
                         if hasattr(block.mlp.experts, 'compute_top_singular_vectors'):
@@ -453,7 +453,7 @@ while True:
                             
                             eval_metrics[f"router/layer_{layer_idx}/entropy"] = avg_entropy
                             eval_metrics[f"router/layer_{layer_idx}/dead_experts"] = dead_experts
-                            eval_metrics[f"router/layer_{layer_idx}/expert_counts"] = wandb.Histogram(expert_counts.cpu().numpy())
+                            #eval_metrics[f"router/layer_{layer_idx}/expert_counts"] = wandb.Histogram(expert_counts.cpu().numpy())
             wandb.log(eval_metrics)
 
         if losses['val'] < best_val_loss or always_save_checkpoint:
