@@ -537,7 +537,7 @@ while True:
                     baseline = pre_shock_baseline_cv if 'pre_shock_baseline_cv' in locals() else 0.1
                     if current_cv <= (baseline * 1.10):
                         # CORRECTED: This measures duration from the initial shock
-                        total_shock_duration = iter_num - step_shock_start
+                        total_shock_duration = iter_num - step_recovery_start
                         has_recovered = True
                         if master_process:
                             print(f"\n[RECOVERY] Recovered in {total_shock_duration} steps!")
@@ -601,37 +601,38 @@ while True:
 
             # --- Per-Layer Router Stats, Gradients & Metric Harvesting ---
             if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
-                for layer_idx, block in enumerate(raw_model.transformer.h):
-                    
-                    if hasattr(block, 'mlp'):
-                        # 1. Track Entropy and Dead Experts (Keeping math on GPU)
-                        if hasattr(block.mlp, 'total_tracked_tokens') and block.mlp.total_tracked_tokens > 0:
-                            tokens = block.mlp.total_tracked_tokens.item()
-                            avg_entropy = block.mlp.running_entropy_sum.item() / tokens
-                            layer_dead_experts_tensor = (block.mlp.running_expert_counts == 0).sum()
-                            
-                            layer_metrics[f"router/layer_{layer_idx}/entropy"] = avg_entropy
-                            layer_metrics[f"router/layer_{layer_idx}/dead_experts"] = layer_dead_experts_tensor
-                            
-                            block.mlp.total_tracked_tokens.zero_()
-                            block.mlp.running_entropy_sum.zero_()
-                            block.mlp.running_expert_counts.zero_()
+                if master_process:
+                    for layer_idx, block in enumerate(raw_model.transformer.h):
+                        
+                        if hasattr(block, 'mlp'):
+                            # 1. Track Entropy and Dead Experts (Keeping math on GPU)
+                            if hasattr(block.mlp, 'total_tracked_tokens') and block.mlp.total_tracked_tokens > 0:
+                                tokens = block.mlp.total_tracked_tokens.item()
+                                avg_entropy = block.mlp.running_entropy_sum.item() / tokens
+                                layer_dead_experts_tensor = (block.mlp.running_expert_counts == 0).sum()
+                                
+                                layer_metrics[f"router/layer_{layer_idx}/entropy"] = avg_entropy
+                                layer_metrics[f"router/layer_{layer_idx}/dead_experts"] = layer_dead_experts_tensor
+                                
+                                block.mlp.total_tracked_tokens.zero_()
+                                block.mlp.running_entropy_sum.zero_()
+                                block.mlp.running_expert_counts.zero_()
 
-                        # 2. Track Router Gradient Norms & Harvest Metrics
-                        if hasattr(block.mlp, 'router'):
-                            router = block.mlp.router
-                            
-                            # Harvest metrics saved during the forward pass
-                            if hasattr(router, 'latest_dropped_tokens'):
-                                total_dropped += router.latest_dropped_tokens.item()
-                                total_kl += router.latest_kl_div.item()
-                                total_cv += router.latest_capacity_cv.item()
-                                layers_counted += 1
+                            # 2. Track Router Gradient Norms & Harvest Metrics
+                            if hasattr(block.mlp, 'router'):
+                                router = block.mlp.router
+                                
+                                # Harvest metrics saved during the forward pass
+                                if hasattr(router, 'latest_dropped_tokens'):
+                                    total_dropped += router.latest_dropped_tokens.item()
+                                    total_kl += router.latest_kl_div.item()
+                                    total_cv += router.latest_capacity_cv.item()
+                                    layers_counted += 1
 
-                            # Get gradients safely (Keeping norm on GPU)
-                            if hasattr(router, 'w_g') and router.w_g.weight.grad is not None:
-                                layer_router_norm_tensor = router.w_g.weight.grad.data.norm(2)
-                                layer_metrics[f"router/layer_{layer_idx}/grad_norm"] = layer_router_norm_tensor
+                                # Get gradients safely (Keeping norm on GPU)
+                                if hasattr(router, 'w_g') and router.w_g.weight.grad is not None:
+                                    layer_router_norm_tensor = router.w_g.weight.grad.data.norm(2)
+                                    layer_metrics[f"router/layer_{layer_idx}/grad_norm"] = layer_router_norm_tensor
 
             # Calculate global averages from the harvested layers
             avg_kl_div = total_kl / layers_counted if layers_counted > 0 else 0.0
