@@ -530,8 +530,9 @@ while True:
                 if current_cv > collapse_threshold and not has_collapsed:
                     time_to_collapse = iter_num - step_shock_start
                     has_collapsed = True
-                    print(f"\n[SHOCK] Collapse Reached in {time_to_collapse} steps (CV: {current_cv:.2f})!")
-                    if wandb_log: wandb.log({"metrics/Time_to_Collapse": time_to_collapse}, step=iter_num)
+                    if master_process:
+                        print(f"\n[SHOCK] Collapse Reached in {time_to_collapse} steps (CV: {current_cv:.2f})!")
+                        if wandb_log: wandb.log({"metrics/Time_to_Collapse": time_to_collapse}, step=iter_num)
 
             # 3. Track Recovery (Only checks after recovery phase begins AND a collapse was recorded)
             if iter_num >= step_recovery_start:
@@ -541,8 +542,9 @@ while True:
                     if current_cv <= (baseline * 1.10):
                         time_to_recovery = iter_num - step_recovery_start
                         has_recovered = True
-                        print(f"\n[RECOVERY] Recovered in {time_to_recovery} steps!")
-                        if wandb_log: wandb.log({"metrics/Time_to_Recovery": time_to_recovery}, step=iter_num)
+                        if master_process:
+                            print(f"\n[RECOVERY] Recovered in {time_to_recovery} steps!")
+                            if wandb_log: wandb.log({"metrics/Time_to_Recovery": time_to_recovery}, step=iter_num)
 
     actual_model = model.module if ddp else model
     router_weights = [p for n, p in raw_model.named_parameters() if 'w_g.weight' in n]
@@ -640,11 +642,10 @@ while True:
                                 layer_router_norm = router_weight.grad.data.norm(2).item()
                                 train_metrics[f"router/layer_{layer_idx}/grad_norm"] = layer_router_norm
 
-            # Send group to WandB
-            wandb.log(train_metrics)
-
             # Envoi groupé unique à W&B
             wandb.log(train_metrics)
+
+            router_probs.clear()
 
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
     
