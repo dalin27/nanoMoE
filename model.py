@@ -582,9 +582,18 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None):
         device = idx.device
         b, t = idx.size()
-        # ... (embedding and block loop code) ...
-        for block in self.transformer.h:
-            x = block(x)
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device)
+
+        # 1. Explicitly initialize x before the loop
+        tok_emb = self.transformer.wte(idx)
+        pos_emb = self.transformer.wpe(pos)
+        x = self.transformer.drop(tok_emb + pos_emb)
+
+        # 2. Use a standard loop that is easier for Dynamo to track
+        for i in range(len(self.transformer.h)):
+            x = self.transformer.h[i](x)
+            
         x = self.transformer.ln_f(x)
 
         # --- HARVEST LOSSES AND METRICS FROM LAYERS ---
