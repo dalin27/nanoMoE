@@ -403,14 +403,16 @@ class MOELayer(nn.Module):
         self.experts = MLPExperts(config) # group of MLPs (experts)
 
         # --- Tracking State ---
+        # --- Tracking State ---
         self.tracking_enabled = False
         self.register_buffer('running_expert_counts', torch.zeros(config.n_exp))
-        self.running_entropy_sum = 0.0
+        # Keep entropy tracking on the GPU tensor graph
+        self.register_buffer('running_entropy_sum', torch.zeros(1)) 
         self.total_tracked_tokens = 0
 
     def reset_tracking_stats(self):
         self.running_expert_counts.zero_()
-        self.running_entropy_sum = 0.0
+        self.running_entropy_sum.zero_()  # Clear tensor natively
         self.total_tracked_tokens = 0
 
     def forward(self, x: torch.Tensor):
@@ -424,16 +426,14 @@ class MOELayer(nn.Module):
         # Assumes exp_weight or a derivative represents the assignment probabilities
         if self.tracking_enabled:
             with torch.no_grad():
-                # 1. Track Entropy
+                # 1. Track Entropy (pure tensor operations)
                 probs_flat = exp_weight.view(num_tokens, -1)
                 entropy = -torch.sum(probs_flat * torch.log(probs_flat + 1e-10), dim=-1)
-                self.running_entropy_sum += entropy.sum().item()
+                self.running_entropy_sum += entropy.sum() # NO MORE .item() here!
                 
-                # 2. Track Expert Assignments (assuming exp_weight contains probabilities)
-                expert_assignments = torch.argmax(probs_flat, dim=-1) # Shape: (num_tokens,)
-                # Create a one-hot encoding of the assignments: Shape (num_tokens, n_exp)
+                # 2. Track Expert Assignments (one-hot approach)
+                expert_assignments = torch.argmax(probs_flat, dim=-1)
                 one_hot = torch.nn.functional.one_hot(expert_assignments, num_classes=probs_flat.size(-1))
-                # Sum across the token dimension to get total counts per expert: Shape (n_exp,)
                 batch_counts = one_hot.sum(dim=0)
                 self.running_expert_counts += batch_counts
                 

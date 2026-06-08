@@ -447,7 +447,7 @@ while True:
                         # We also check for the router and its latest probabilities
                         if hasattr(block.mlp, 'total_tracked_tokens') and block.mlp.total_tracked_tokens > 0:
                             tokens = block.mlp.total_tracked_tokens
-                            avg_entropy = block.mlp.running_entropy_sum / tokens
+                            avg_entropy = block.mlp.running_entropy_sum.item() / tokens
                             expert_counts = block.mlp.running_expert_counts
                             dead_experts = (expert_counts == 0).sum().item()
                             
