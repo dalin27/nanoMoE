@@ -582,42 +582,52 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None):
         device = idx.device
         b, t = idx.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
-
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        # ... (embedding and block loop code) ...
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
 
+        # --- HARVEST LOSSES AND METRICS FROM LAYERS ---
         aux_loss_val = torch.tensor(0.0, device=device)
         z_loss_val = torch.tensor(0.0, device=device)
+        
+        # Lists to gather router stats across layers
+        router_probs_list = []
+        max_logits = []
+        avg_logits = []
+        total_dropped = 0
+
+        if self.config.n_exp > 1:
+            for block in self.transformer.h:
+                if hasattr(block, 'mlp') and hasattr(block.mlp, 'router'):
+                    router = block.mlp.router
+                    
+                    # 1. Harvest Losses
+                    aux_loss_val += router.aux_loss
+                    z_loss_val += router.z_loss
+                    
+                    # 2. Harvest Metrics
+                    router_probs_list.append(router.latest_probs)
+                    max_logits.append(router.latest_max_logit)
+                    avg_logits.append(router.latest_avg_logit)
+                    total_dropped += router.latest_dropped_tokens
 
         if targets is not None:
-            # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
-
-            # add the auxiliary load balancing loss and router z loss to the main loss
-            if self.config.n_exp > 1 and self.config.use_aux_loss:
-                aux_loss_val = MANAGER.aggregate_aux_loss()
-                loss += self.config.aux_loss_weight * aux_loss_val
-                MANAGER.reset_aux_loss()
-            if self.config.n_exp > 1 and self.config.use_router_z_loss:
-                z_loss_val = MANAGER.aggregate_router_z_loss()
-                loss += self.config.router_z_loss_weight * z_loss_val
-                MANAGER.reset_router_z_loss()
+            
+            # Combine harvested losses
+            loss += self.config.aux_loss_weight * aux_loss_val
+            loss += self.config.router_z_loss_weight * z_loss_val
         else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits = self.lm_head(x[:, [-1], :])
             loss = None
 
-        max_logit, avg_logit, router_probs, dropped_tokens = MANAGER.get_router_stats()
-
-        return logits, loss, aux_loss_val, z_loss_val, max_logit, avg_logit, router_probs, dropped_tokens
+        # Compute averages for logging
+        max_logit = torch.stack(max_logits).mean() if max_logits else torch.tensor(0.0, device=device)
+        avg_logit = torch.stack(avg_logits).mean() if avg_logits else torch.tensor(0.0, device=device)
+        
+        return logits, loss, aux_loss_val, z_loss_val, max_logit, avg_logit, router_probs_list, total_dropped
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
