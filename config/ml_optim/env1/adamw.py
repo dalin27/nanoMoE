@@ -9,6 +9,15 @@ init_from = 'scratch'
 wandb_project = 'ml-optim'
 wandb_run_name ='gpt2-moe-adamw_' + time.strftime('%Y-%m-%d %H:%M:%S')
 
+
+max_iters = 7500
+lr_decay_iters = 7500
+
+# eval stuff
+eval_interval = 500
+eval_iters = 20
+log_interval = 10
+
 # model/moe settings
 n_exp = 8
 top_k = 1 

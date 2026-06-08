@@ -345,8 +345,8 @@ running_mfu = -1.0
 #collapse
 collapse_threshold = 2.0
 pre_shock_baseline_cv = 0.0 # You will calculate this dynamically before step 5000
-step_shock_start = 100
-step_recovery_start = 150
+step_shock_start = 5000
+step_recovery_start = 5100
 
 # State trackers
 time_to_collapse = None
@@ -502,47 +502,6 @@ while True:
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
 
-
-    # TCCR tracking
-    if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
-        # Extract router probabilities from the LAST layer
-        last_layer_idx = len(raw_model.transformer.h) - 1
-        last_block = raw_model.transformer.h[last_layer_idx]
-        
-        if hasattr(last_block.mlp, 'router') and hasattr(last_block.mlp.router, 'latest_probs'):
-            # Calculate CV of expert distribution
-            probs = last_block.mlp.router.latest_probs
-            expert_assignments = torch.argmax(probs.view(-1, probs.size(-1)), dim=-1)
-            expert_counts = torch.bincount(expert_assignments, minlength=n_exp).float()
-            
-            # CV = standard deviation / mean
-            current_cv = (expert_counts.std(unbiased=False) / (expert_counts.mean() + 1e-10)).item()
-            
-            # 1. Capture Baseline
-            if iter_num == step_shock_start - 1:
-                pre_shock_baseline_cv = current_cv
-                
-            # 2. Track Collapse
-            if iter_num >= step_shock_start:
-                if current_cv > collapse_threshold and not has_collapsed:
-                    time_to_collapse = iter_num - step_shock_start
-                    has_collapsed = True
-                    if master_process:
-                        print(f"\n[SHOCK] Collapse Reached in {time_to_collapse} steps (CV: {current_cv:.2f})!")
-                        if wandb_log: wandb.log({"metrics/Time_to_Collapse": time_to_collapse}, step=iter_num)
-
-            # 3. Track Recovery (Use the shock start as the reference point)
-            if iter_num >= step_recovery_start:
-                if has_collapsed and not has_recovered:
-                    baseline = pre_shock_baseline_cv if 'pre_shock_baseline_cv' in locals() else 0.1
-                    if current_cv <= (baseline * 1.10):
-                        # CORRECTED: This measures duration from the initial shock
-                        total_shock_duration = iter_num - step_recovery_start
-                        has_recovered = True
-                        if master_process:
-                            print(f"\n[RECOVERY] Recovered in {total_shock_duration} steps!")
-                            if wandb_log: wandb.log({"metrics/Total_Shock_Duration": total_shock_duration}, step=iter_num)
-
     actual_model = model.module if ddp else model
     router_weights = [p for n, p in raw_model.named_parameters() if 'w_g.weight' in n]
     
@@ -562,6 +521,8 @@ while True:
         scaler.unscale_(optimizer)
         total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         total_norm = total_norm.item()
+
+    kl_div = 0
 
     # timing and logging
     t1 = time.time()
@@ -642,6 +603,8 @@ while True:
                             
             # Calculate global averages from the harvested layers
             avg_kl_div = total_kl / layers_counted if layers_counted > 0 else 0.0
+            kl_div = avg_kl_div
+
             avg_capacity_cv = total_cv / layers_counted if layers_counted > 0 else 0.0
 
             # Build the final metrics dictionary
@@ -672,6 +635,49 @@ while True:
 
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
     
+    # TCCR tracking
+    if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
+        # Extract router probabilities from the LAST layer
+        last_layer_idx = len(raw_model.transformer.h) - 1
+        last_block = raw_model.transformer.h[last_layer_idx]
+        
+        if hasattr(last_block.mlp, 'router') and hasattr(last_block.mlp.router, 'latest_probs'):
+            # Calculate CV of expert distribution
+            probs = last_block.mlp.router.latest_probs
+            expert_assignments = torch.argmax(probs.view(-1, probs.size(-1)), dim=-1)
+            expert_counts = torch.bincount(expert_assignments, minlength=n_exp).float()
+            
+            # CV = standard deviation / mean
+            current_cv = (expert_counts.std(unbiased=False) / (expert_counts.mean() + 1e-10)).item()
+            
+            if iter_num == step_shock_start - 1:
+                pre_shock_baseline_cv = current_cv
+                pre_shock_baseline_loss = lossf  # Captured from your main lossf variable
+                pre_shock_baseline_kl = kl_div    # Captured from your MANAGER/metrics harvest
+                pre_shock_baseline_grad = total_norm
+
+            # 2. Inside the Recovery check (iter_num >= step_recovery_start)
+            if has_collapsed and not has_recovered:
+                # Define health criteria: within 10% of original baseline
+                is_cv_recovered = current_cv <= (pre_shock_baseline_cv * 1.10)
+                is_loss_recovered = lossf <= (pre_shock_baseline_loss * 1.10)
+                is_kl_recovered = kl_div <= (pre_shock_baseline_kl * 1.10)
+                
+                # Check if ALL metrics meet recovery criteria
+                if is_cv_recovered and is_loss_recovered and is_kl_recovered:
+                    total_shock_duration = iter_num - step_shock_start
+                    has_recovered = True
+                    
+                    if master_process:
+                        print(f"\n[FULL RECOVERY] Metrics normalized in {total_shock_duration} steps!")
+                        if wandb_log:
+                            wandb.log({
+                                "metrics/Total_Shock_Duration": total_shock_duration,
+                                "metrics/Final_Loss_Delta": lossf - pre_shock_baseline_loss,
+                                "metrics/Final_KL_Delta": kl_div - pre_shock_baseline_kl
+                            }, step=iter_num)
+
+
     # =========================================================================
     # PRE-STEP: Capture gradients before the optimizer modifies or erases them
     # =========================================================================

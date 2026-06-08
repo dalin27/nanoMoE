@@ -52,7 +52,7 @@ log_interval = 10
 optimizer_choice = 'sparse_adam'
 weight_decay = 0.0 # Kept at 0.0 to match Adagrad baseline
 beta1 = 0.9        # Standard Adam beta1
-beta2 = 0.999      # Standard Adam beta2
+beta2 = 0.95      # Standard Adam beta2
 momentum = 0.0
 grad_clip = 5.0 # high ghost clip
 
