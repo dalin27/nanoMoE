@@ -430,8 +430,11 @@ class MOELayer(nn.Module):
                 self.running_entropy_sum += entropy.sum().item()
                 
                 # 2. Track Expert Assignments (assuming exp_weight contains probabilities)
-                expert_assignments = torch.argmax(probs_flat, dim=-1)
-                batch_counts = torch.bincount(expert_assignments, minlength=probs_flat.size(-1))
+                expert_assignments = torch.argmax(probs_flat, dim=-1) # Shape: (num_tokens,)
+                # Create a one-hot encoding of the assignments: Shape (num_tokens, n_exp)
+                one_hot = torch.nn.functional.one_hot(expert_assignments, num_classes=probs_flat.size(-1))
+                # Sum across the token dimension to get total counts per expert: Shape (n_exp,)
+                batch_counts = one_hot.sum(dim=0)
                 self.running_expert_counts += batch_counts
                 
                 self.total_tracked_tokens += num_tokens
