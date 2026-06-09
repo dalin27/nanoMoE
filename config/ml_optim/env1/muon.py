@@ -54,7 +54,7 @@ optimizer_choice = 'muon'
 weight_decay = 0.01 
 momentum = 0.95        # Muon utilise le Nesterov momentum
 ns_steps = 5           # Étapes de Newton-Schulz (paramètre standard de Muon)
-grad_clip = 5.0 
+grad_clip = 1.0 
 
 # learning rate decay settings
 decay_lr = True 
