@@ -777,10 +777,13 @@ while True:
         
         training_state.prev_router_weight = current_weight.clone()
 
-    if wandb_log and master_process and len(metrics) > 0:
-        wandb.log(metrics)
-        if len(metrics) == 0:
+    if wandb_log and iter_num % wandb_interval == 0 and master_process:
+        if metrics:
+            wandb.log(metrics)
+        else:
             print('issue logging')
+
+        
 
     iter_num += 1
     local_iter_num += 1
