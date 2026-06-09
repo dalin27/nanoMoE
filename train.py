@@ -342,17 +342,19 @@ local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 
-#collapse
+#track collapse
 collapse_threshold = 2.0
 pre_shock_baseline_cv = 0.0 # You will calculate this dynamically before step 5000
 step_shock_start = 5000
 step_recovery_start = 5100
-
-# State trackers
-time_to_collapse = None
-time_to_recovery = None
+ema_cv = ema_loss = ema_kl = ema_grad = None
+peak_shock_loss = 0.0
+total_excess_loss = 0.0
 has_collapsed = False
 has_recovered = False
+
+
+
 
 stop_file_path = os.path.join(os.getcwd(), 'STOP')
 
@@ -393,8 +395,6 @@ while True:
     is_in_shock_window = (step_shock_start - 50) <= iter_num <= (step_recovery_start + 200)
     
     if is_in_shock_window:
-        old_wandb_int = wandb_interval
-        old_log_int = log_interval
         wandb_interval = 5  
         log_interval = 5
     else: 
@@ -636,47 +636,90 @@ while True:
 
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
     
-    # TCCR tracking
-    if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
-        # Extract router probabilities from the LAST layer
-        last_layer_idx = len(raw_model.transformer.h) - 1
-        last_block = raw_model.transformer.h[last_layer_idx]
+# TCCR tracking
+if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
+    # Extract router probabilities from the LAST layer
+    last_layer_idx = len(raw_model.transformer.h) - 1
+    last_block = raw_model.transformer.h[last_layer_idx]
+    
+    if hasattr(last_block.mlp, 'router') and hasattr(last_block.mlp.router, 'latest_probs'):
+        # Calculate CV of expert distribution
+        probs = last_block.mlp.router.latest_probs
+        expert_assignments = torch.argmax(probs.view(-1, probs.size(-1)), dim=-1)
+        expert_counts = torch.bincount(expert_assignments, minlength=n_exp).float()
         
-        if hasattr(last_block.mlp, 'router') and hasattr(last_block.mlp.router, 'latest_probs'):
-            # Calculate CV of expert distribution
-            probs = last_block.mlp.router.latest_probs
-            expert_assignments = torch.argmax(probs.view(-1, probs.size(-1)), dim=-1)
-            expert_counts = torch.bincount(expert_assignments, minlength=n_exp).float()
-            
-            # CV = standard deviation / mean
-            current_cv = (expert_counts.std(unbiased=False) / (expert_counts.mean() + 1e-10)).item()
-            
-            if iter_num == step_shock_start - 1:
-                pre_shock_baseline_cv = current_cv
-                pre_shock_baseline_loss = lossf  # Captured from your main lossf variable
-                pre_shock_baseline_kl = kl_div    # Captured from your MANAGER/metrics harvest
-                pre_shock_baseline_grad = total_norm
+        current_cv = (expert_counts.std(unbiased=False) / (expert_counts.mean() + 1e-10)).item()
+        
+        # --- 1. Update Exponential Moving Averages (EMA) ---
+        alpha = 0.1
+        if ema_loss is None:
+            ema_cv, ema_loss, ema_kl, ema_grad = current_cv, lossf, kl_div, total_norm
+        else:
+            ema_cv = alpha * current_cv + (1 - alpha) * ema_cv
+            ema_loss = alpha * lossf + (1 - alpha) * ema_loss
+            ema_kl = alpha * kl_div + (1 - alpha) * ema_kl
+            ema_grad = alpha * total_norm + (1 - alpha) * ema_grad
 
-            # 2. Inside the Recovery check (iter_num >= step_recovery_start)
-            if has_collapsed and not has_recovered:
-                # Define health criteria: within 10% of original baseline
-                is_cv_recovered = current_cv <= (pre_shock_baseline_cv * 1.10)
-                is_loss_recovered = lossf <= (pre_shock_baseline_loss * 1.10)
-                is_kl_recovered = kl_div <= (pre_shock_baseline_kl * 1.10)
+        if master_process and wandb_log:
+            wandb.log({
+                "EMA/CV": ema_cv,
+                "EMA/Loss": ema_loss,
+                "EMA/KL_Div": ema_kl,
+                "EMA/Grad_Norm": ema_grad,
+            }, step=iter_num)
+
+        # --- 2. Capture Pre-Shock Baseline ---
+        if iter_num == step_shock_start - 1:
+            pre_shock_baseline_cv = ema_cv
+            pre_shock_baseline_loss = ema_loss
+            pre_shock_baseline_kl = ema_kl
+            pre_shock_baseline_grad = ema_grad
+            # Explicitly set collapse flag so the tracking knows the shock has begun
+            has_collapsed = True 
+
+        # --- 3. Track the 3 Key Metrics DURING the shock ---
+        if has_collapsed and not has_recovered:
+            
+            # Metric A: Peak Shock Loss (Severity)
+            if ema_loss > peak_shock_loss:
+                peak_shock_loss = ema_loss
                 
-                # Check if ALL metrics meet recovery criteria
-                if is_cv_recovered and is_loss_recovered and is_kl_recovered:
-                    total_shock_duration = iter_num - step_shock_start
-                    has_recovered = True
+            # Metric B: Total Wasted Compute (Excess Loss Area)
+            # We only accumulate loss that is strictly above our baseline
+            if ema_loss > pre_shock_baseline_loss:
+                total_excess_loss += (ema_loss - pre_shock_baseline_loss)
+
+        # --- 4. Recovery Check ---
+        if iter_num >= step_recovery_start and has_collapsed and not has_recovered:
+            
+            # Define health criteria using smoothed metrics against baselines
+            is_cv_recovered = ema_cv <= (pre_shock_baseline_cv * 1.10)
+            is_loss_recovered = ema_loss <= (pre_shock_baseline_loss * 1.10)
+            is_kl_recovered = ema_kl <= (pre_shock_baseline_kl * 1.10)
+            is_grad_recovered = ema_grad <= (pre_shock_baseline_grad * 1.15)
+            
+            # Check if ALL smoothed metrics meet recovery criteria
+            if is_cv_recovered and is_loss_recovered and is_kl_recovered and is_grad_recovered:
+                has_recovered = True
+                total_shock_duration = iter_num - step_shock_start
+                
+                # Metric C: Average Recovery Rate
+                # Avoid division by zero if it recovers instantly
+                duration_divisor = max(total_shock_duration, 1) 
+                avg_recovery_rate = (peak_shock_loss - pre_shock_baseline_loss) / duration_divisor
+                
+                if master_process:
+                    print(f"\n[FULL RECOVERY] Metrics normalized in {total_shock_duration} steps!")
+                    print(f"  -> Peak Severity: {peak_shock_loss - pre_shock_baseline_loss:.4f}")
+                    print(f"  -> Total Excess Loss: {total_excess_loss:.4f}")
                     
-                    if master_process:
-                        print(f"\n[FULL RECOVERY] Metrics normalized in {total_shock_duration} steps!")
-                        if wandb_log:
-                            wandb.log({
-                                "metrics/Total_Shock_Duration": total_shock_duration,
-                                "metrics/Final_Loss_Delta": lossf - pre_shock_baseline_loss,
-                                "metrics/Final_KL_Delta": kl_div - pre_shock_baseline_kl
-                            }, step=iter_num)
+                    if wandb_log:
+                        wandb.log({
+                            "metrics/Total_Shock_Duration": total_shock_duration,
+                            "metrics/Peak_Loss_Severity": peak_shock_loss - pre_shock_baseline_loss,
+                            "metrics/Total_Wasted_Loss_Cost": total_excess_loss,
+                            "metrics/Average_Recovery_Rate": avg_recovery_rate
+                        }, step=iter_num)
 
 
     # =========================================================================

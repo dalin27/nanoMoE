@@ -11,7 +11,7 @@ wandb_run_name ='gpt2-moe-adamw_' + time.strftime('%Y-%m-%d %H:%M:%S')
 
 
 max_iters = 7500
-lr_decay_iters = 7500
+lr_decay_iters = 50000
 
 # eval stuff
 eval_interval = 500
