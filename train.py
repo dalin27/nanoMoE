@@ -104,6 +104,7 @@ decay_lr = True # whether to decay the learning rate
 warmup_iters = 2000 # how many steps to warm up for
 lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
 min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+adam_lr = min_lr
 
 gpu_count = 1
 
@@ -392,9 +393,27 @@ while True:
             print("Checkpoint sauvegardé avec succès. Sortie.")
         break
     # determine and set the learning rate for this iteration
+
     lr = get_lr(iter_num) if decay_lr else learning_rate
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
+
+    if hasattr(optimizer, 'optimizers'):
+        muon_opt = optimizer.optimizers[0]
+        adamw_opt = optimizer.optimizers[1]
+        
+        # 1. Update Muon with the main learning rate (starts at 0.02)
+        for param_group in muon_opt.param_groups:
+            param_group['lr'] = lr
+            
+        # 2. Update AdamW proportionally (starts at 3e-4)
+        # This keeps AdamW decaying on the exact same curve as Muon
+        current_adam_lr = (lr / learning_rate) * adam_lr 
+        for param_group in adamw_opt.param_groups:
+            param_group['lr'] = current_adam_lr
+
+    # Standard behavior for single optimizers (AdamW, Lion, etc.)
+    else:
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
 
     #set shock log
     is_in_shock_window = (step_shock_start - 50) <= iter_num <= (step_recovery_start + 200)
