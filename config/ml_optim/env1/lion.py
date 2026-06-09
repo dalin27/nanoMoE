@@ -54,7 +54,7 @@ weight_decay = 1.0    # Lion nécessite un WD beaucoup plus fort (AdamW: 0.1 -> 
 beta1 = 0.9
 beta2 = 0.99          # 0.99 est le standard recommandé pour Lion
 momentum = 0
-grad_clip = 1.0       # Généralement rabaissé pour Lion
+grad_clip = 5.0       # Généralement rabaissé pour Lion
 
 # learning rate decay settings
 decay_lr = True 
