@@ -11,7 +11,7 @@ wandb_run_name ='gpt2-moe-adamw_' + time.strftime('%Y-%m-%d %H:%M:%S')
 
 
 max_iters = 7500
-lr_decay_iters = 50000
+lr_decay_iters = 30000
 
 # eval stuff
 eval_interval = 500
@@ -41,8 +41,8 @@ stride = 1
 # total batch size
 batch_size = 32
 block_size = 1024
-gradient_accumulation_steps = 16
-gpu_count = 2
+gradient_accumulation_steps = 2
+gpu_count = 4
 
 tokens_iter = batch_size * block_size * gradient_accumulation_steps * gpu_count
 tokens_expert = tokens_iter * top_k / n_exp
