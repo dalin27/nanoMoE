@@ -354,7 +354,8 @@ has_collapsed = False
 has_recovered = False
 is_in_shock_window = False
 
-
+rank = int(os.environ.get('RANK', 0))
+master_process = (rank == 0)
 
 
 stop_file_path = os.path.join(os.getcwd(), 'STOP')
