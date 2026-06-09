@@ -360,6 +360,7 @@ is_in_shock_window = False
 stop_file_path = os.path.join(os.getcwd(), 'STOP')
 
 while True:
+    metrics = {}
     #manual stop
     stop_training = torch.tensor(0, dtype=torch.int32, device=device)
     if master_process:
@@ -454,7 +455,7 @@ while True:
                             eval_metrics[f"experts/layer_{layer_idx}/mean_pairwise_sim"] = pairwise_similarities.mean().item()
                             eval_metrics[f"experts/layer_{layer_idx}/max_pairwise_sim"] = pairwise_similarities.max().item()
 
-            wandb.log(eval_metrics, step=iter_num)
+            metrics |= eval_metrics
 
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
@@ -543,7 +544,7 @@ while True:
             gpu_mfu = raw_mfu / ddp_world_size
             running_mfu = gpu_mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*gpu_mfu
         
-        if wandb_log and iter_num % wandb_interval == 0:
+        if wandb_log and iter_num % wandb_interval == 0 and master_process:
             all_router_probs = torch.cat(router_probs, dim=0)
 
             expert_assignments = torch.argmax(all_router_probs, dim=-1)
@@ -633,7 +634,7 @@ while True:
             # Merge layer metrics into the main payload
             train_metrics.update(layer_metrics)
 
-            wandb.log(train_metrics, step=iter_num)
+            metrics |= train_metrics
             router_probs.clear()
 
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
@@ -664,13 +665,15 @@ while True:
                 ema_dropped = alpha * total_dropped + (1 - alpha) * ema_dropped
 
             if master_process and wandb_log and iter_num % wandb_interval == 0:
-                wandb.log({
+                ema_metrics = {
                     "EMA/CV": ema_cv,
                     "EMA/Loss": ema_loss,
                     "EMA/KL_Div": ema_kl,
                     "EMA/Grad_Norm": ema_grad,
                     "EMA/dropped_tokens": ema_dropped,
-                }, step=iter_num)
+                }
+
+                metrics |= ema_metrics
 
             # --- 2. Capture Pre-Shock Baseline ---
             if iter_num == step_shock_start - 1:
@@ -720,12 +723,15 @@ while True:
                         print(f"  -> Total Excess Loss: {total_excess_loss:.4f}")
                         
                         if wandb_log:
-                            wandb.log({
+                            shock_metrics = {
                                 "metrics/Total_Shock_Duration": total_shock_duration,
                                 "metrics/Peak_Loss_Severity": peak_shock_loss - pre_shock_baseline_loss,
                                 "metrics/Total_Wasted_Loss_Cost": total_excess_loss,
                                 "metrics/Average_Recovery_Rate": avg_recovery_rate,
-                            }, step=iter_num)
+                            }
+
+                            metrics |= shock_metrics
+
 
 
     # =========================================================================
@@ -770,6 +776,9 @@ while True:
             training_state.prev_router_update = actual_update.clone()
         
         training_state.prev_router_weight = current_weight.clone()
+
+    if wandb_log and master_process and len(metrics) > 0:
+        wandb.log(metrics)
 
     iter_num += 1
     local_iter_num += 1
