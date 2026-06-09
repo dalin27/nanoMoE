@@ -454,7 +454,7 @@ while True:
                             eval_metrics[f"experts/layer_{layer_idx}/mean_pairwise_sim"] = pairwise_similarities.mean().item()
                             eval_metrics[f"experts/layer_{layer_idx}/max_pairwise_sim"] = pairwise_similarities.max().item()
 
-            wandb.log(eval_metrics, commit = False)
+            wandb.log(eval_metrics, step=iter_num)
 
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
@@ -633,7 +633,7 @@ while True:
             # Merge layer metrics into the main payload
             train_metrics.update(layer_metrics)
 
-            wandb.log(train_metrics, commit = False)
+            wandb.log(train_metrics, step=iter_num)
             router_probs.clear()
 
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
