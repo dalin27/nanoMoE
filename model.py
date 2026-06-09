@@ -422,6 +422,23 @@ class Block(nn.Module):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
+    
+
+class MultipleOptimizerWrapper:
+    """
+    A simple wrapper to allow calling .step() and .zero_grad() on multiple 
+    optimizers at once. This is required for Muon, which uses a hybrid setup.
+    """
+    def __init__(self, *optimizers):
+        self.optimizers = optimizers
+
+    def zero_grad(self, **kwargs):
+        for opt in self.optimizers:
+            opt.zero_grad(**kwargs)
+
+    def step(self, **kwargs):
+        for opt in self.optimizers:
+            opt.step(**kwargs)
 
 @dataclass
 class GPTConfig:
@@ -448,7 +465,6 @@ class GPTConfig:
     use_switch_tfm_init: bool = False  # use weight init scheme from Switch Transformer
     switch_tfm_init_scale: float = 1.0
     router_use_full_prec: bool = False  # use float32 precision in the router
-
 
 class GPT(nn.Module):
 
@@ -701,98 +717,68 @@ class GPT(nn.Module):
 
         return model
 
+    
     def configure_optimizers(self, optimizer_choice, weight_decay, learning_rate, betas, device_type, momentum, nesterov):
-        # TODO: add expert config
-        # start with all of the candidate parameters
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        # filter out those that do not require grad
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        # add an extra check for "bias" string to account for bias terms in MoE layers
+        # 1. Parameter grouping (Decay vs No-Decay)
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+        
+        # 2D+ tensors (weights/embeddings) get decay; 1D tensors (biases/layernorms) do not
         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2 ]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}
         ]
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-
-        optimizer_classes = {
-            'adamw': torch.optim.AdamW,
-            'adam': torch.optim.Adam,
-            'sgd': torch.optim.SGD, 
-            'adafactor': torch.optim.Adafactor, # Note: Ensure this is correctly imported/patched 
-            'adagrad': torch.optim.Adagrad,
-            'sparse_adam': torch.optim.SparseAdam   # PyTorch native LazyAdam implementation
-        }
-
-        if optimizer_choice not in optimizer_classes:
-            raise ValueError(f"Unrecognized optimizer_choice: {optimizer_choice}")
         
-        optim_class = optimizer_classes[optimizer_choice]
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {sum(p.numel() for p in decay_params):,} parameters")
+        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {sum(p.numel() for p in nodecay_params):,} parameters")
 
-        fused_available = 'fused' in inspect.signature(optim_class).parameters
-        use_fused = fused_available and device_type == 'cuda'
-        extra_args = dict(fused=True) if use_fused else dict()
-
-        print(f"using fused {optimizer_choice}: {use_fused}")
-
-        # In your training loop initialization:
-        if optimizer_choice == 'adamw':
-            optimizer = optim_class(
-                optim_groups, 
-                lr=learning_rate, 
-                betas=betas, 
-                **extra_args
-            )
-
-        elif optimizer_choice == 'adam':
-            optimizer = optim_class(
-                optim_groups, 
-                lr=learning_rate, 
-                betas=betas, 
-                **extra_args
-            )
-
-        elif optimizer_choice == 'sgd':
-
-            sgd_args = {k: v for k, v in extra_args.items() if k in ['fused']}
-            optimizer = optim_class(
-                optim_groups, 
-                lr=learning_rate, 
-                momentum=momentum,
-                nesterov=nesterov,
-                **sgd_args
-            )
-
-        elif optimizer_choice == 'adafactor': 
-            optimizer = optim_class(
-                optim_groups, 
-                lr=learning_rate, 
-                betas=betas, 
-                **extra_args
-            )
-            
-        elif optimizer_choice == 'adagrad':
-            optimizer = optim_class(
-                optim_groups,
-                lr=learning_rate,
-                **extra_args
-            )
-            
-        elif optimizer_choice == 'sparse_adam':
-            optimizer = optim_class(
-                optim_groups,
-                lr=learning_rate,
-                betas=betas,
-                **extra_args
-            )
+        # 2. Dynamic Optimizer Mapping & Contextual Imports
+        optimizer_choice = optimizer_choice.lower()
         
-        return optimizer
+        if optimizer_choice == 'lion':
+            from lion_pytorch import Lion
+            optim_class = Lion
+        elif optimizer_choice == 'muon':
+            from muon import Muon
+            optim_class = Muon
+        else:
+            # Standard PyTorch mapping
+            optimizer_classes = {
+                'adamw': torch.optim.AdamW,
+                'adam': torch.optim.Adam,
+                'sgd': torch.optim.SGD, 
+                'adafactor': getattr(torch.optim, 'Adafactor', None), # Fallback if not patched globally
+                'adagrad': torch.optim.Adagrad,
+                'sparse_adam': torch.optim.SparseAdam,
+            }
+            if optimizer_choice not in optimizer_classes or optimizer_classes[optimizer_choice] is None:
+                raise ValueError(f"Unrecognized or unsupported optimizer_choice: {optimizer_choice}")
+            optim_class = optimizer_classes[optimizer_choice]
+
+        # 3. Dynamic Argument Construction
+        # Base arguments shared by almost everything
+        optim_args = {'lr': learning_rate}
+        sig_params = inspect.signature(optim_class).parameters
+
+        # Map parameters if they exist in the target optimizer's signature
+        if 'betas' in sig_params:
+            optim_args['betas'] = betas
+        if 'momentum' in sig_params:
+            optim_args['momentum'] = momentum
+        if 'nesterov' in sig_params:
+            optim_args['nesterov'] = nesterov
+
+        # Handle fused kernels if available on CUDA
+        if 'fused' in sig_params and device_type == 'cuda':
+            optim_args['fused'] = True
+            print(f"using fused {optimizer_choice}: True")
+        elif 'fused' in sig_params:
+            print(f"using fused {optimizer_choice}: False (not on CUDA)")
+
+        # 4. Instantiate and Return
+        return optim_class(optim_groups, **optim_args)
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
