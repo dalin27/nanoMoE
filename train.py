@@ -347,7 +347,7 @@ collapse_threshold = 2.0
 pre_shock_baseline_cv = 0.0 # You will calculate this dynamically before step 5000
 step_shock_start = 5000
 step_recovery_start = 5100
-ema_cv = ema_loss = ema_kl = ema_grad = None
+ema_cv = ema_loss = ema_kl = ema_grad = ema_dropped = None
 peak_shock_loss = 0.0
 total_excess_loss = 0.0
 has_collapsed = False
@@ -653,12 +653,13 @@ if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
         # --- 1. Update Exponential Moving Averages (EMA) ---
         alpha = 0.1
         if ema_loss is None:
-            ema_cv, ema_loss, ema_kl, ema_grad = current_cv, lossf, kl_div, total_norm
+            ema_cv, ema_loss, ema_kl, ema_grad, ema_dropped = current_cv, lossf, kl_div, total_norm, total_dropped
         else:
             ema_cv = alpha * current_cv + (1 - alpha) * ema_cv
             ema_loss = alpha * lossf + (1 - alpha) * ema_loss
             ema_kl = alpha * kl_div + (1 - alpha) * ema_kl
             ema_grad = alpha * total_norm + (1 - alpha) * ema_grad
+            ema_dropped = alpha * total_dropped + (1 - alpha) * ema_dropped
 
         if master_process and wandb_log:
             wandb.log({
@@ -666,6 +667,7 @@ if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
                 "EMA/Loss": ema_loss,
                 "EMA/KL_Div": ema_kl,
                 "EMA/Grad_Norm": ema_grad,
+                "EMA/dropped_tokens": ema_dropped,
             }, step=iter_num)
 
         # --- 2. Capture Pre-Shock Baseline ---
@@ -674,6 +676,7 @@ if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
             pre_shock_baseline_loss = ema_loss
             pre_shock_baseline_kl = ema_kl
             pre_shock_baseline_grad = ema_grad
+            pre_shock_baseline_dropped = ema_dropped
             # Explicitly set collapse flag so the tracking knows the shock has begun
             has_collapsed = True 
 
@@ -697,9 +700,10 @@ if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
             is_loss_recovered = ema_loss <= (pre_shock_baseline_loss * 1.10)
             is_kl_recovered = ema_kl <= (pre_shock_baseline_kl * 1.10)
             is_grad_recovered = ema_grad <= (pre_shock_baseline_grad * 1.15)
+            is_dropped_recovered = ema_dropped <= (pre_shock_baseline_dropped * 1.10)
             
             # Check if ALL smoothed metrics meet recovery criteria
-            if is_cv_recovered and is_loss_recovered and is_kl_recovered and is_grad_recovered:
+            if is_cv_recovered and is_loss_recovered and is_kl_recovered and is_grad_recovered and is_dropped_recovered:
                 has_recovered = True
                 total_shock_duration = iter_num - step_shock_start
                 
@@ -718,7 +722,7 @@ if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
                             "metrics/Total_Shock_Duration": total_shock_duration,
                             "metrics/Peak_Loss_Severity": peak_shock_loss - pre_shock_baseline_loss,
                             "metrics/Total_Wasted_Loss_Cost": total_excess_loss,
-                            "metrics/Average_Recovery_Rate": avg_recovery_rate
+                            "metrics/Average_Recovery_Rate": avg_recovery_rate,
                         }, step=iter_num)
 
 
