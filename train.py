@@ -523,6 +523,7 @@ while True:
         total_norm = total_norm.item()
 
     kl_div = 0
+    lossf = 0
 
     # timing and logging
     t1 = time.time()
