@@ -779,6 +779,8 @@ while True:
 
     if wandb_log and master_process and len(metrics) > 0:
         wandb.log(metrics)
+    else: 
+        print('issue logging')
 
     iter_num += 1
     local_iter_num += 1
