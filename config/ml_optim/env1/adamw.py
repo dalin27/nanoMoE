@@ -41,7 +41,7 @@ stride = 1
 # total batch size
 batch_size = 32
 block_size = 1024
-gradient_accumulation_steps = 2
+gradient_accumulation_steps = 8
 gpu_count = 4
 
 tokens_iter = batch_size * block_size * gradient_accumulation_steps * gpu_count
