@@ -41,7 +41,7 @@ limit_expert = tokens_expert * train_capacity
 if True: print(f'tokens, per iter: {tokens_iter}, per expert: {tokens_expert}; limit: {limit_expert}')
 
 max_iters = 7000
-lr_decay_iters = 3000
+lr_decay_iters = 30000
 
 # eval stuff
 eval_interval = 500
