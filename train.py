@@ -362,6 +362,8 @@ stop_file_path = os.path.join(os.getcwd(), 'STOP')
 
 while True:
     metrics = {}
+    rank = int(os.environ.get('RANK', 0))
+    print(f"DEBUG: I am Rank {rank} and I am at iteration {iter_num}", flush=True)
     #manual stop
     stop_training = torch.tensor(0, dtype=torch.int32, device=device)
     if master_process:
