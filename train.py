@@ -524,6 +524,7 @@ while True:
 
     kl_div = 0
     lossf = 0
+    total_dropped = 0
 
     # timing and logging
     t1 = time.time()
