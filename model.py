@@ -722,14 +722,34 @@ class GPT(nn.Module):
         # 1. Parameter grouping (Decay vs No-Decay)
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
         
-        # 2D+ tensors (weights/embeddings) get decay; 1D tensors (biases/layernorms) do not
+        # --- MODIFIED FOR MUON COMPATIBILITY ---
+        muon_params = []
+        adamw_decay_params = []
+        adamw_nodecay_params = []
+
+        for n, p in param_dict.items():
+            if p.dim() < 2:
+                # 1D Tensors: Biases, LayerNorms (No weight decay)
+                adamw_nodecay_params.append(p)
+            elif p.dim() > 2:
+                # 3D+ Packed MoE Tensors: Bypasses Muon, uses AdamW with weight decay
+                adamw_decay_params.append(p)
+            else:
+                # Strictly 2D Tensors: Standard Linear layer weights (Muon)
+                # Muon works best when out_features >= in_features. If heavily non-square, route to AdamW
+                if p.size(0) >= p.size(1):
+                    muon_params.append(p)
+                else:
+                    adamw_decay_params.append(p)
+
+        # Standard fallback grouping for non-Muon optimizers
         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-        
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}
         ]
+        # ----------------------------------------
         
         print(f"num decayed parameter tensors: {len(decay_params)}, with {sum(p.numel() for p in decay_params):,} parameters")
         print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {sum(p.numel() for p in nodecay_params):,} parameters")
@@ -749,7 +769,7 @@ class GPT(nn.Module):
                 'adamw': torch.optim.AdamW,
                 'adam': torch.optim.Adam,
                 'sgd': torch.optim.SGD, 
-                'adafactor': getattr(torch.optim, 'Adafactor', None), # Fallback if not patched globally
+                'adafactor': getattr(torch.optim, 'Adafactor', None), 
                 'adagrad': torch.optim.Adagrad,
                 'sparse_adam': torch.optim.SparseAdam,
             }
@@ -758,11 +778,9 @@ class GPT(nn.Module):
             optim_class = optimizer_classes[optimizer_choice]
 
         # 3. Dynamic Argument Construction
-        # Base arguments shared by almost everything
         optim_args = {'lr': learning_rate}
         sig_params = inspect.signature(optim_class).parameters
 
-        # Map parameters if they exist in the target optimizer's signature
         if 'betas' in sig_params:
             optim_args['betas'] = betas
         if 'momentum' in sig_params:
@@ -770,14 +788,30 @@ class GPT(nn.Module):
         if 'nesterov' in sig_params:
             optim_args['nesterov'] = nesterov
 
-        # Handle fused kernels if available on CUDA
         if 'fused' in sig_params and device_type == 'cuda':
             optim_args['fused'] = True
             print(f"using fused {optimizer_choice}: True")
         elif 'fused' in sig_params:
             print(f"using fused {optimizer_choice}: False (not on CUDA)")
 
-        # 4. Instantiate and Return
+        # 4. Instantiate and Return (MODIFIED FOR MUON HYBRID WRAPPER)
+        if optimizer_choice == 'muon':
+            # 1. Instantiate AdamW for everything that isn't running on Muon
+            adamw_groups = [
+                {'params': adamw_decay_params, 'weight_decay': weight_decay},
+                {'params': adamw_nodecay_params, 'weight_decay': 0.0}
+            ]
+            # Use fused AdamW if we are on CUDA
+            use_fused_adam = (device_type == 'cuda')
+            adamw_opt = torch.optim.AdamW(adamw_groups, lr=3e-4, betas=betas, fused=use_fused_adam)
+            
+            # 2. Instantiate Muon for the true 2D linear matrices
+            muon_opt = optim_class(muon_params, lr=learning_rate, momentum=momentum)
+            
+            # 3. Return wrapped together
+            return MultipleOptimizerWrapper(muon_opt, adamw_opt)
+            
+        # Default behavior for everything else
         return optim_class(optim_groups, **optim_args)
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
