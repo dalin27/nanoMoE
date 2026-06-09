@@ -759,12 +759,14 @@ class GPT(nn.Module):
             )
 
         elif optimizer_choice == 'sgd':
+
+            sgd_args = {k: v for k, v in extra_args.items() if k in ['fused']}
             optimizer = optim_class(
                 optim_groups, 
                 lr=learning_rate, 
                 momentum=momentum,
                 nesterov=nesterov,
-                **extra_args
+                **sgd_args
             )
 
         elif optimizer_choice == 'adafactor': 

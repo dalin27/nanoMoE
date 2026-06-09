@@ -59,5 +59,5 @@ grad_clip = 5.0 # high ghost clip
 # learning rate decay settings
 decay_lr = True 
 warmup_iters = 500 
-learning_rate = 6e-4 # SGD often requires learning rate tuning distinct from Adam
-min_lr = 6e-5
+learning_rate = 0.01 # SGD often requires learning rate tuning distinct from Adam
+min_lr = 0.001
