@@ -662,7 +662,7 @@ while True:
                 ema_grad = alpha * total_norm + (1 - alpha) * ema_grad
                 ema_dropped = alpha * total_dropped + (1 - alpha) * ema_dropped
 
-            if master_process and wandb_log:
+            if master_process and wandb_log and iter_num % wandb_interval:
                 wandb.log({
                     "EMA/CV": ema_cv,
                     "EMA/Loss": ema_loss,
