@@ -398,24 +398,27 @@ while True:
 
     lr = get_lr(iter_num) if decay_lr else learning_rate
 
-    if hasattr(optimizer, 'optimizers'):
-        muon_opt = optimizer.optimizers[0]
-        adamw_opt = optimizer.optimizers[1]
-        
-        # 1. Update Muon with the main learning rate (starts at 0.02)
-        for param_group in muon_opt.param_groups:
-            param_group['lr'] = lr
-            
-        # 2. Update AdamW proportionally (starts at 3e-4)
-        # This keeps AdamW decaying on the exact same curve as Muon
-        current_adam_lr = (lr / learning_rate) * adam_lr 
-        for param_group in adamw_opt.param_groups:
-            param_group['lr'] = current_adam_lr
+    if losses['val'] < best_val_loss or always_save_checkpoint:
+            best_val_loss = losses['val']
+            if iter_num > 0:
+                
+                # 1. Extract optimizer states safely
+                if hasattr(optimizer, 'optimizers'):
+                    opt_state = [opt.state_dict() for opt in optimizer.optimizers]
+                else:
+                    opt_state = optimizer.state_dict()
 
-    # Standard behavior for single optimizers (AdamW, Lion, etc.)
-    else:
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
+                # 2. Save to checkpoint
+                checkpoint = {
+                    'model': raw_model.state_dict(),
+                    'optimizer': opt_state,  # Use the extracted state here
+                    'model_args': model_args,
+                    'iter_num': iter_num,
+                    'best_val_loss': best_val_loss,
+                    'config': config,
+                }
+                print(f"saving checkpoint to {out_dir}")
+                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
 
     #set shock log
     is_in_shock_window = (step_shock_start - 50) <= iter_num <= (step_recovery_start + 200)
