@@ -761,7 +761,7 @@ class GPT(nn.Module):
             from lion_pytorch import Lion
             optim_class = Lion
         elif optimizer_choice == 'muon':
-            from muon import Muon
+            from optimizer.muon import Muon
             optim_class = Muon
         else:
             # Standard PyTorch mapping
