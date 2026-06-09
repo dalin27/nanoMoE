@@ -352,6 +352,7 @@ peak_shock_loss = 0.0
 total_excess_loss = 0.0
 has_collapsed = False
 has_recovered = False
+is_in_shock_window = False
 
 
 
