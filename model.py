@@ -723,7 +723,7 @@ class GPT(nn.Module):
 
         optimizer_classes = {
             'adamw': torch.optim.AdamW,
-            'adam_vanilla': torch.optim.Adam,
+            'adam': torch.optim.Adam,
             'sgd': torch.optim.SGD, 
             'adafactor': torch.optim.Adafactor, # Note: Ensure this is correctly imported/patched 
             'adagrad': torch.optim.Adagrad,
@@ -750,7 +750,7 @@ class GPT(nn.Module):
                 **extra_args
             )
 
-        elif optimizer_choice == 'adam_vanilla':
+        elif optimizer_choice == 'adam':
             optimizer = optim_class(
                 optim_groups, 
                 lr=learning_rate, 
