@@ -17,7 +17,7 @@ aux_loss_weight = 0.0
 use_router_z_loss = False
 router_z_loss_weight = 0.0 
 use_noisy_top_k = False
-train_capacity = 8
+train_capacity = 3.0
 eval_capacity = 2.0
 stride = 1
 use_switch_tfm_init = True
@@ -32,8 +32,8 @@ n_embd = 384
 # total batch size
 batch_size = 32
 block_size = 1024
-gradient_accumulation_steps = 16
-gpu_count = 2
+gradient_accumulation_steps = 8
+gpu_count = 4
 
 tokens_iter = batch_size * block_size * gradient_accumulation_steps * gpu_count
 tokens_expert = tokens_iter * top_k / n_exp
@@ -41,7 +41,7 @@ limit_expert = tokens_expert * train_capacity
 if True: print(f'tokens, per iter: {tokens_iter}, per expert: {tokens_expert}; limit: {limit_expert}')
 
 max_iters = 7500
-lr_decay_iters = 7500
+lr_decay_iters = 30000
 
 # eval stuff
 eval_interval = 500

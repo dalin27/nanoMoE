@@ -7,7 +7,7 @@ import time
 wandb_log = True
 init_from = 'scratch'
 wandb_project = 'ml-optim'
-wandb_run_name ='gpt2-moe-adam ' + time.strftime('%Y-%m-%d %H:%M:%S')
+wandb_run_name ='gpt2-moe-adam_' + time.strftime('%Y-%m-%d %H:%M:%S')
 
 # model/moe settings
 n_exp = 8
@@ -17,7 +17,7 @@ aux_loss_weight = 0.0
 use_router_z_loss = False
 router_z_loss_weight = 0.0 
 use_noisy_top_k = False
-train_capacity = 8
+train_capacity = 3.0
 eval_capacity = 2.0
 stride = 1
 use_switch_tfm_init = True
@@ -32,7 +32,7 @@ n_embd = 384
 # total batch size
 batch_size = 32
 block_size = 1024
-gradient_accumulation_steps = 1 #from 16
+gradient_accumulation_steps = 8 #from 16
 gpu_count = 4
 
 tokens_iter = batch_size * block_size * gradient_accumulation_steps * gpu_count

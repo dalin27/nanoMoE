@@ -782,7 +782,7 @@ class GPT(nn.Module):
                 **extra_args
             )
             
-        elif optimizer_choice == 'lazy_adam':
+        elif optimizer_choice == 'sparse_adam':
             optimizer = optim_class(
                 optim_groups,
                 lr=learning_rate,

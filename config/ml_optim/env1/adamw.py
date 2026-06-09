@@ -10,7 +10,7 @@ wandb_project = 'ml-optim'
 wandb_run_name ='gpt2-moe-adamw_' + time.strftime('%Y-%m-%d %H:%M:%S')
 
 
-max_iters = 7500
+max_iters = 7000
 lr_decay_iters = 30000
 
 # eval stuff
