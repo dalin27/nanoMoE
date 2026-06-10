@@ -398,29 +398,6 @@ while True:
 
     lr = get_lr(iter_num) if decay_lr else learning_rate
 
-    if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
-            if iter_num > 0:
-                
-                # 1. Extract optimizer states safely
-                if hasattr(optimizer, 'optimizers'):
-                    opt_state = [opt.state_dict() for opt in optimizer.optimizers]
-                else:
-                    opt_state = optimizer.state_dict()
-
-                # 2. Save to checkpoint
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': opt_state,  # Use the extracted state here
-                    'model_args': model_args,
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'config': config,
-                }
-                if master_process:
-                    print(f"saving checkpoint to {out_dir}")
-                    torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
-
     #set shock log
     is_in_shock_window = (step_shock_start - 50) <= iter_num <= (step_recovery_start + 200)
     
@@ -488,9 +465,17 @@ while True:
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
+                
+                # 1. Extract optimizer states safely
+                if hasattr(optimizer, 'optimizers'):
+                    opt_state = [opt.state_dict() for opt in optimizer.optimizers]
+                else:
+                    opt_state = optimizer.state_dict()
+
+                # 2. Save to checkpoint
                 checkpoint = {
                     'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
+                    'optimizer': opt_state,  # Use the extracted state here
                     'model_args': model_args,
                     'iter_num': iter_num,
                     'best_val_loss': best_val_loss,
