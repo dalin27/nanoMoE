@@ -66,5 +66,5 @@ learning_rate = 6e-4            # Remember to scale this down if passing Lion!
 min_lr = 6e-5
 
 # Homogeneous Data Shock Parameters
-step_shock_start = 1500
-step_recovery_start = 2000
+step_shock_start = 2500
+step_recovery_start = 3000
