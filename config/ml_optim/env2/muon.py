@@ -11,7 +11,7 @@ wandb_project = 'ml-optim'
 optimizer_choice = 'muon'
 wandb_run_name = f'env2_{optimizer_choice}_' + time.strftime('%Y-%m-%d %H:%M:%S')
 
-max_iters = 7000
+max_iters = 4000
 lr_decay_iters = 30000
 
 eval_interval = 500
