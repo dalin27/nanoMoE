@@ -42,9 +42,9 @@ n_embd = 768                    # Up from 384
 stride = 2                      
 
 # Total batch size (unchanged)
-batch_size = 32
+batch_size = 16
 block_size = 1024
-gradient_accumulation_steps = 8
+gradient_accumulation_steps = 16
 gpu_count = 4
 
 tokens_iter = batch_size * block_size * gradient_accumulation_steps * gpu_count
