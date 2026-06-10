@@ -751,7 +751,19 @@ while True:
     # PRE-STEP: Capture gradients before the optimizer modifies or erases them
     # =========================================================================
     with torch.no_grad():
-        router_layer_target = model.module.transformer.h[-1].mlp.router.w_g if hasattr(model, 'module') else model.transformer.h[-1].mlp.router.w_g
+        # Unwrap DDP module if necessary
+        base_model = model.module if hasattr(model, 'module') else model
+        
+        # Dynamically find the last layer that possesses a router
+        router_layer_target = None
+        for block in reversed(base_model.transformer.h):
+            if hasattr(block.mlp, 'router'):
+                router_layer_target = block.mlp.router.w_g
+                break
+                
+        if router_layer_target is None:
+            raise ValueError("No MoE layer with a router was found in the model.")
+
         weight_pre_step = router_layer_target.weight.detach().clone()
         grad_t = router_layer_target.weight.grad.detach().clone() if router_layer_target.weight.grad is not None else None
 
