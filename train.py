@@ -111,7 +111,6 @@ gpu_count = 1
 #shock
 step_shock_start = 5000
 step_recovery_start = 5100
-shock_duration = step_recovery_start - step_recovery_start
 
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -737,6 +736,8 @@ while True:
                 if is_cv_recovered and is_loss_recovered and is_kl_recovered and is_grad_recovered and is_dropped_recovered:
                     training_state.has_recovered = True
                     total_shock_duration = iter_num - step_shock_start
+                    shock_duration = step_recovery_start - step_shock_start
+
                     
                     # Metric C: Average Recovery Rate
                     duration_divisor = max(total_shock_duration, 1) 
@@ -750,7 +751,7 @@ while True:
                         if wandb_log:
                             shock_metrics = {
                                 "metrics/Total_Shock_Duration": total_shock_duration,
-                                "metrics/Total_Shock_Length": shock_duration,
+                                "metrics/time_in_shock": shock_duration,
                                 "metrics/Peak_Loss_Severity": training_state.peak_shock_loss - training_state.pre_shock_baseline_loss,
                                 "metrics/Total_Wasted_Loss_Cost": training_state.total_excess_loss,
                                 "metrics/Average_Recovery_Rate": avg_recovery_rate,

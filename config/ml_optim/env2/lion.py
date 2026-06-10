@@ -11,7 +11,7 @@ optimizer_choice = 'lion'
 
 wandb_run_name = f'env2_{optimizer_choice}_' + time.strftime('%Y-%m-%d %H:%M:%S')
 
-max_iters = 7000
+max_iters = 4000
 lr_decay_iters = 30000
 
 eval_interval = 500
@@ -52,10 +52,6 @@ tokens_expert = tokens_iter * top_k / n_exp
 limit_expert = tokens_expert * train_capacity
 if True: print(f'tokens, per iter: {tokens_iter}, per expert: {tokens_expert}; limit: {limit_expert}')
 
-# Homogeneous Data Shock Parameters
-step_shock_start = 5000
-step_recovery_start = 5500 
-
 # Learning rate decay settings
 decay_lr = True 
 warmup_iters = 500 
@@ -66,4 +62,8 @@ weight_decay = 1.0
 beta1 = 0.9
 beta2 = 0.99          
 momentum = 0.0       
-grad_clip = 1.0       
+grad_clip = 1.0     
+
+# Homogeneous Data Shock Parameters
+step_shock_start = 2500
+step_recovery_start = 3000 

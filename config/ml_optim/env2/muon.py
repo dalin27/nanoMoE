@@ -52,9 +52,6 @@ tokens_expert = tokens_iter * top_k / n_exp
 limit_expert = tokens_expert * train_capacity
 if True: print(f'tokens, per iter: {tokens_iter}, per expert: {tokens_expert}; limit: {limit_expert}')
 
-# Homogeneous Data Shock Parameters
-step_shock_start = 5000
-step_recovery_start = 5500 
 
 # Learning rate decay settings
 decay_lr = True 
@@ -73,3 +70,7 @@ weight_decay = 0.01
 momentum = 0.95        # Nesterov momentum
 muon_ns_steps = 5           
 grad_clip = 1.0
+
+# Homogeneous Data Shock Parameters
+step_shock_start = 2500
+step_recovery_start = 3000 
