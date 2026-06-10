@@ -111,6 +111,7 @@ gpu_count = 1
 #shock
 step_shock_start = 5000
 step_recovery_start = 5100
+shock_duration = step_recovery_start - step_recovery_start
 
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -396,7 +397,7 @@ while True:
         break
     # determine and set the learning rate for this iteration
 
-    lr = get_lr(iter_num) if decay_lr else learning_rate
+    lr = get_lr(iter_num) if decay_lr else learning_rate 
 
     #set shock log
     is_in_shock_window = (step_shock_start - 50) <= iter_num <= (step_recovery_start + 200)
@@ -749,6 +750,7 @@ while True:
                         if wandb_log:
                             shock_metrics = {
                                 "metrics/Total_Shock_Duration": total_shock_duration,
+                                "metrics/Total_Shock_Length": shock_duration,
                                 "metrics/Peak_Loss_Severity": training_state.peak_shock_loss - training_state.pre_shock_baseline_loss,
                                 "metrics/Total_Wasted_Loss_Cost": training_state.total_excess_loss,
                                 "metrics/Average_Recovery_Rate": avg_recovery_rate,
