@@ -654,13 +654,17 @@ while True:
     
     # TCCR tracking
     if hasattr(raw_model, 'transformer') and hasattr(raw_model.transformer, 'h'):
-        # Extract router probabilities from the LAST layer
-        last_layer_idx = len(raw_model.transformer.h) - 1
-        last_block = raw_model.transformer.h[last_layer_idx]
         
-        if hasattr(last_block.mlp, 'router') and hasattr(last_block.mlp.router, 'latest_probs'):
+        # Dynamically find the last layer that actually contains a router
+        target_block = None
+        for block in reversed(raw_model.transformer.h):
+            if hasattr(block.mlp, 'router') and hasattr(block.mlp.router, 'latest_probs'):
+                target_block = block
+                break
+        
+        if target_block is not None:
             # Calculate CV of expert distribution
-            probs = last_block.mlp.router.latest_probs
+            probs = target_block.mlp.router.latest_probs
             expert_assignments = torch.argmax(probs.view(-1, probs.size(-1)), dim=-1)
             expert_counts = torch.bincount(expert_assignments, minlength=n_exp).float()
             
@@ -668,81 +672,83 @@ while True:
             
             # --- 1. Update Exponential Moving Averages (EMA) ---
             alpha = 0.1
-            if ema_loss is None:
-                ema_cv, ema_loss, ema_kl, ema_grad, ema_dropped = current_cv, lossf, kl_div, total_norm, total_dropped
+            
+            # Ensure EMAs are bound to a persistent object (e.g., training_state)
+            if getattr(training_state, 'ema_loss', None) is None:
+                training_state.ema_cv = current_cv
+                training_state.ema_loss = lossf
+                training_state.ema_kl = kl_div
+                training_state.ema_grad = total_norm
+                training_state.ema_dropped = total_dropped
             else:
-                ema_cv = alpha * current_cv + (1 - alpha) * ema_cv
-                ema_loss = alpha * lossf + (1 - alpha) * ema_loss
-                ema_kl = alpha * kl_div + (1 - alpha) * ema_kl
-                ema_grad = alpha * total_norm + (1 - alpha) * ema_grad
-                ema_dropped = alpha * total_dropped + (1 - alpha) * ema_dropped
+                training_state.ema_cv = alpha * current_cv + (1 - alpha) * training_state.ema_cv
+                training_state.ema_loss = alpha * lossf + (1 - alpha) * training_state.ema_loss
+                training_state.ema_kl = alpha * kl_div + (1 - alpha) * training_state.ema_kl
+                training_state.ema_grad = alpha * total_norm + (1 - alpha) * training_state.ema_grad
+                training_state.ema_dropped = alpha * total_dropped + (1 - alpha) * training_state.ema_dropped
 
             if master_process and wandb_log and iter_num % wandb_interval == 0:
                 ema_metrics = {
-                    "EMA/CV": ema_cv,
-                    "EMA/Loss": ema_loss,
-                    "EMA/KL_Div": ema_kl,
-                    "EMA/Grad_Norm": ema_grad,
-                    "EMA/dropped_tokens": ema_dropped,
+                    "EMA/CV": training_state.ema_cv,
+                    "EMA/Loss": training_state.ema_loss,
+                    "EMA/KL_Div": training_state.ema_kl,
+                    "EMA/Grad_Norm": training_state.ema_grad,
+                    "EMA/dropped_tokens": training_state.ema_dropped,
                 }
-
                 metrics |= ema_metrics
 
             # --- 2. Capture Pre-Shock Baseline ---
             if iter_num == step_shock_start - 1:
-                pre_shock_baseline_cv = ema_cv
-                pre_shock_baseline_loss = ema_loss
-                pre_shock_baseline_kl = ema_kl
-                pre_shock_baseline_grad = ema_grad
-                pre_shock_baseline_dropped = ema_dropped
-                # Explicitly set collapse flag so the tracking knows the shock has begun
-                has_collapsed = True 
+                training_state.pre_shock_baseline_cv = training_state.ema_cv
+                training_state.pre_shock_baseline_loss = training_state.ema_loss
+                training_state.pre_shock_baseline_kl = training_state.ema_kl
+                training_state.pre_shock_baseline_grad = training_state.ema_grad
+                training_state.pre_shock_baseline_dropped = training_state.ema_dropped
+                training_state.has_collapsed = True 
 
             # --- 3. Track the 3 Key Metrics DURING the shock ---
-            if has_collapsed and not has_recovered:
+            # Initialize these on your training_state object before the loop starts
+            if getattr(training_state, 'has_collapsed', False) and not getattr(training_state, 'has_recovered', False):
                 
                 # Metric A: Peak Shock Loss (Severity)
-                if ema_loss > peak_shock_loss:
-                    peak_shock_loss = ema_loss
+                if training_state.ema_loss > training_state.peak_shock_loss:
+                    training_state.peak_shock_loss = training_state.ema_loss
                     
                 # Metric B: Total Wasted Compute (Excess Loss Area)
-                # We only accumulate loss that is strictly above our baseline
-                if ema_loss > pre_shock_baseline_loss:
-                    total_excess_loss += (ema_loss - pre_shock_baseline_loss)
+                if training_state.ema_loss > training_state.pre_shock_baseline_loss:
+                    training_state.total_excess_loss += (training_state.ema_loss - training_state.pre_shock_baseline_loss)
 
             # --- 4. Recovery Check ---
-            if iter_num >= step_recovery_start and has_collapsed and not has_recovered:
+            if iter_num >= step_recovery_start and getattr(training_state, 'has_collapsed', False) and not getattr(training_state, 'has_recovered', False):
                 
                 # Define health criteria using smoothed metrics against baselines
-                is_cv_recovered = ema_cv <= (pre_shock_baseline_cv * 1.10)
-                is_loss_recovered = ema_loss <= (pre_shock_baseline_loss * 1.10)
-                is_kl_recovered = ema_kl <= (pre_shock_baseline_kl * 1.10)
-                is_grad_recovered = ema_grad <= (pre_shock_baseline_grad * 1.15)
-                is_dropped_recovered = ema_dropped <= (pre_shock_baseline_dropped * 1.10)
+                is_cv_recovered = training_state.ema_cv <= (training_state.pre_shock_baseline_cv * 1.10)
+                is_loss_recovered = training_state.ema_loss <= (training_state.pre_shock_baseline_loss * 1.10)
+                is_kl_recovered = training_state.ema_kl <= (training_state.pre_shock_baseline_kl * 1.10)
+                is_grad_recovered = training_state.ema_grad <= (training_state.pre_shock_baseline_grad * 1.15)
+                is_dropped_recovered = training_state.ema_dropped <= (training_state.pre_shock_baseline_dropped * 1.10)
                 
                 # Check if ALL smoothed metrics meet recovery criteria
                 if is_cv_recovered and is_loss_recovered and is_kl_recovered and is_grad_recovered and is_dropped_recovered:
-                    has_recovered = True
+                    training_state.has_recovered = True
                     total_shock_duration = iter_num - step_shock_start
                     
                     # Metric C: Average Recovery Rate
-                    # Avoid division by zero if it recovers instantly
                     duration_divisor = max(total_shock_duration, 1) 
-                    avg_recovery_rate = (peak_shock_loss - pre_shock_baseline_loss) / duration_divisor
+                    avg_recovery_rate = (training_state.peak_shock_loss - training_state.pre_shock_baseline_loss) / duration_divisor
                     
                     if master_process:
                         print(f"\n[FULL RECOVERY] Metrics normalized in {total_shock_duration} steps!")
-                        print(f"  -> Peak Severity: {peak_shock_loss - pre_shock_baseline_loss:.4f}")
-                        print(f"  -> Total Excess Loss: {total_excess_loss:.4f}")
+                        print(f"  -> Peak Severity: {training_state.peak_shock_loss - training_state.pre_shock_baseline_loss:.4f}")
+                        print(f"  -> Total Excess Loss: {training_state.total_excess_loss:.4f}")
                         
                         if wandb_log:
                             shock_metrics = {
                                 "metrics/Total_Shock_Duration": total_shock_duration,
-                                "metrics/Peak_Loss_Severity": peak_shock_loss - pre_shock_baseline_loss,
-                                "metrics/Total_Wasted_Loss_Cost": total_excess_loss,
+                                "metrics/Peak_Loss_Severity": training_state.peak_shock_loss - training_state.pre_shock_baseline_loss,
+                                "metrics/Total_Wasted_Loss_Cost": training_state.total_excess_loss,
                                 "metrics/Average_Recovery_Rate": avg_recovery_rate,
                             }
-
                             metrics |= shock_metrics
 
 
@@ -809,7 +815,6 @@ while True:
         else:
             print('issue logging')
 
-        
 
     iter_num += 1
     local_iter_num += 1
