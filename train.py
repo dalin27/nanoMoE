@@ -706,6 +706,10 @@ while True:
                 training_state.pre_shock_baseline_dropped = training_state.ema_dropped
                 training_state.has_collapsed = True 
 
+                training_state.peak_shock_loss = training_state.ema_loss  # Initialize to current EMA
+                training_state.total_excess_loss = 0.0
+                training_state.has_recovered = False
+
             # --- 3. Track the 3 Key Metrics DURING the shock ---
             # Initialize these on your training_state object before the loop starts
             if getattr(training_state, 'has_collapsed', False) and not getattr(training_state, 'has_recovered', False):
