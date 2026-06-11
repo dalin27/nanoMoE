@@ -11,7 +11,7 @@ wandb_project = 'ml-optim'
 optimizer_choice = 'muon'
 wandb_run_name = f'env2_{optimizer_choice}_' + time.strftime('%Y-%m-%d %H:%M:%S')
 
-max_iters = 4000
+max_iters = 3000
 lr_decay_iters = 30000
 
 eval_interval = 500
@@ -72,5 +72,5 @@ muon_ns_steps = 5
 grad_clip = 1.0
 
 # Homogeneous Data Shock Parameters
-step_shock_start = 2500
-step_recovery_start = 3000 
+step_shock_start = 1500
+step_recovery_start = 1800 
