@@ -11,7 +11,7 @@ wandb_project = 'ml-optim'
 optimizer_choice = os.getenv('OPTIMIZER', 'adamw') 
 wandb_run_name = f'env2_{optimizer_choice}_' + time.strftime('%Y-%m-%d %H:%M:%S')
 
-max_iters = 5000
+max_iters = 3000
 lr_decay_iters = 30000
 
 eval_interval = 500
@@ -67,4 +67,4 @@ min_lr = 6e-5
 
 # Homogeneous Data Shock Parameters
 step_shock_start = 1500
-step_recovery_start = 2000
+step_recovery_start = 1800
