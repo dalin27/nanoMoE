@@ -58,7 +58,7 @@ weight_decay = 0.0
 beta1 = 0.0
 beta2 = 0.0
 momentum = 0.9 # Standard momentum for SGD
-grad_clip = 1.0 # high ghost clip
+grad_clip = 1.0 
 
 # learning rate decay settings
 decay_lr = True 
